@@ -1310,6 +1310,16 @@
       letter-spacing: -0.02em;
       margin: 0;
     }
+    /* Quando um metric__value tem tooltip (atributo title), mostramos
+       um underline pontilhado subtil que sinaliza "passa o rato para
+       saber mais". Padrão de affordance usado em texto técnico. */
+    .metric__value[title]:not([title=""]) {
+      cursor: help;
+      text-decoration: underline dotted;
+      text-decoration-color: var(--text-muted);
+      text-underline-offset: 6px;
+      text-decoration-thickness: 1.5px;
+    }
     .metric__trend {
       display: inline-flex;
       align-items: center;
@@ -2530,7 +2540,7 @@
             </p>
             <span class="hero__confidence">
               <span class="hero__confidence-dot"></span>
-              <span>Analisados <strong id="analyzed-count">238 nós</strong> · 14 páginas</span>
+              <span>Analisados <strong id="analyzed-count">238 nós</strong> · <strong id="pages-count">14</strong> páginas</span>
             </span>
           </div>
         </div>
@@ -2546,8 +2556,10 @@
           </div>
           <div class="metric metric--peach fade-in" style="animation-delay:.1s">
             <p class="metric__label">Inconsistências</p>
-            <p class="metric__value" id="m-inconsistencies">—</p>
-            <span class="metric__trend metric__trend--down">▼ 8 vs. análise anterior</span>
+            <!-- Tooltip nativo no hover via atributo title (preenchido em runtime)
+                 mostra breakdown: "23 detached · 4 duplicados · 12 não usados · 5 deficit adopção" -->
+            <p class="metric__value" id="m-inconsistencies" title="">—</p>
+            <span class="metric__trend metric__trend--down" id="m-inconsistencies-sub">passa o rato para ver detalhe</span>
             <svg class="metric__spark" viewBox="0 0 80 36"><path d="M0,8 L12,14 L24,10 L36,18 L48,16 L60,22 L80,28" stroke="#B45309"/></svg>
           </div>
           <div class="metric metric--lavender fade-in" style="animation-delay:.2s">
@@ -2933,18 +2945,21 @@
                 />
               </div>
               <select id="comp-filter-issue" class="filter-bar__select" aria-label="Filtrar por estado">
-                <option value="all">Todos os estados</option>
-                <option value="ok">Saudáveis</option>
-                <option value="warn">Com avisos</option>
-                <option value="bad">Com problemas</option>
+                <option value="all">Todos os componentes</option>
+                <option value="top">🔥 Top 10 mais usados</option>
+                <option value="ok">✓ Saudáveis</option>
+                <option value="duplicate">⚠ Potencialmente duplicados</option>
+                <option value="unused">✗ Nunca usados</option>
               </select>
               <select id="comp-sort" class="filter-bar__select" aria-label="Ordenar por">
-                <option value="usage">Ordenar por: Uso</option>
-                <option value="name">Ordenar por: Nome</option>
+                <option value="usage">Ordenar por: Mais usados</option>
+                <option value="usage-asc">Ordenar por: Menos usados</option>
+                <option value="name">Ordenar por: Nome (A-Z)</option>
                 <option value="issues">Ordenar por: Problemas</option>
               </select>
-              <span class="filter-bar__count">
+              <span class="filter-bar__count" id="comp-list-count-wrap">
                 <strong id="comp-list-count">0</strong> componentes
+                <span id="comp-list-context" style="margin-left: 8px; color: var(--text-muted)"></span>
               </span>
             </div>
 
@@ -3443,6 +3458,26 @@
       if (real.componentUsage) {
         merged.componentUsage = real.componentUsage;
       }
+
+      // ETAPA 2 (easy wins) — números do hero badge
+      // Estes valores vinham da travessia da árvore na função.
+      if (typeof real.nodesCount === 'number')  merged.analyzedNodes = real.nodesCount;
+      if (typeof real.pagesCount === 'number')  merged.pages          = real.pagesCount;
+
+      // ETAPA 2 (easy wins) — saúde dos componentes (card "Componentes")
+      // Derivada: 1 - (detached / total_local_components) × 100.
+      // Significa: "que percentagem dos componentes locais NÃO está detached".
+      // Coerente com o conceito: muitos detached = saúde baixa.
+      if (real.componentUsage && real.componentUsage.summary) {
+        const totalLocal = real.componentUsage.summary.totalLocalComponents || 0;
+        const detached   = real.detached || 0;
+        if (totalLocal > 0) {
+          // Cap inferior em 0 (caso edge: mais detached do que componentes locais)
+          const health = Math.max(0, Math.round((1 - detached / totalLocal) * 100));
+          merged.compHealth = Math.min(100, health);
+        }
+      }
+
       // fileName é gerido separadamente (vai para o badge no header)
       return merged;
     }
@@ -3460,6 +3495,65 @@
         description: 'O teu Design System está em boa forma, mas há áreas onde podes apertar a consistência.' };
       return { label: 'Sistema muito bom', tone: 'excellent',
         description: 'Excelente coerência geral. Mantém o ritmo de governance e revisões periódicas.' };
+    }
+
+    /* =========================================================
+       HEALTH SCORE REAL — calculado a partir de sinais reais
+       ---------------------------------------------------------
+       Fórmula:
+         score = 100 × (adoption/100)
+                 − penaltyDetached
+                 − penaltyUnused
+                 − penaltyDuplicates
+
+       Adopção como factor multiplicativo: sistema com 0% de uso de
+       tokens não pode ser "saudável" mesmo sem outros problemas.
+
+       Penalizações com saturação (min/max): primeira dezena de cada
+       problema é o que mais dói; a partir daí o impacto satura, para
+       evitar scores negativos.
+
+       Resultado categorizado em múltiplos de 10 (90, 80, 70, ...) para
+       comunicar magnitude sem precisão falsa.
+       ========================================================= */
+    function computeHealthScore(data) {
+      // Verifica se temos pelo menos algum sinal real
+      const hasReal = (data.realAdoption && typeof data.realAdoption.overall === 'number')
+                   || typeof data.detached === 'number'
+                   || (data.componentUsage && data.componentUsage.summary);
+
+      // Se não há dados reais, fallback ao score sintético existente
+      if (!hasReal) return data.score;
+
+      // 1. Base: adopção como factor multiplicativo (0-100)
+      // Se não temos adopção, assumimos 100 (não penalizar a base sem dados)
+      const adoption = (data.realAdoption && typeof data.realAdoption.overall === 'number')
+        ? data.realAdoption.overall
+        : 100;
+      let score = 100 * (adoption / 100);
+
+      // 2. Penalizações (saturadas)
+      const detached    = data.detached || 0;
+      const unused      = (data.componentUsage && data.componentUsage.summary)
+                          ? (data.componentUsage.summary.unusedCount || 0)
+                          : 0;
+      const duplicates  = data.duplicates || 0;
+
+      const penaltyDetached   = Math.min(25, detached   * 0.3);
+      const penaltyUnused     = Math.min(15, unused     * 0.5);
+      const penaltyDuplicates = Math.min(15, duplicates * 2);
+
+      score = score - penaltyDetached - penaltyUnused - penaltyDuplicates;
+
+      // 3. Garantir limites razoáveis [10, 100]
+      // Mínimo 10 evita 0 (que faria animação esquisita do anel)
+      score = Math.max(10, Math.min(100, score));
+
+      // 4. Categorizar em múltiplos de 10
+      // Arredondamos para o múltiplo de 10 mais próximo (round-half-up)
+      score = Math.round(score / 10) * 10;
+
+      return score;
     }
 
     // Pool de problemas — vamos sortear para a tabela
@@ -3507,7 +3601,293 @@
       { text: 'Atualizar a library oficial',          impact: 'Saúde a longo prazo' }
     ];
 
-    // Gera um dataset completo para o dashboard
+    /* =========================================================
+       GERADOR DE ISSUES / INSIGHTS / PRIORIDADES — a partir de dados reais
+       ---------------------------------------------------------
+       Numa única função produz os 3 outputs que alimentam:
+         - Tabela "Componentes problemáticos" (Overview)
+         - Cards "Insights automáticos" (Overview lateral)
+         - Lista "Prioridades" (Overview lateral)
+
+       Todos derivam dos mesmos sinais reais (detached, duplicates,
+       unused, adoption). Coerência garantida — não é possível ter
+       insight "Detached em alta" e prioridade "sem detached".
+
+       Devolve { issues, insights, priorities } prontos para render.
+       Se não há dados reais, devolve null — o caller deve fazer
+       fallback para os pools sintéticos.
+       ========================================================= */
+    function generateRealInsights(data) {
+      // Necessitamos pelo menos de alguns dados reais para gerar
+      const hasReal = data.realAdoption
+                   || data.componentUsage
+                   || typeof data.detached === 'number';
+      if (!hasReal) return null;
+
+      const detached     = data.detached || 0;
+      const duplicates   = data.duplicates || 0;
+      const usage        = data.componentUsage || {};
+      const unusedCount  = (usage.summary && usage.summary.unusedCount) || 0;
+      const adoption     = data.realAdoption;
+      const detSample    = data.detachedSample || [];
+
+      // ---------- 1. ISSUES (tabela "Componentes problemáticos") ----------
+      // Cada issue tem name, type, severity, occurrences, recommendation.
+      // Construímos a partir dos exemplos concretos que a função devolveu.
+      const issues = [];
+
+      // 1a. Detached components — usa a sample real (até 5 exemplos)
+      if (detSample.length) {
+        // Agrupa por nome do componente — múltiplas ocorrências do mesmo
+        // detached agrupam-se numa única issue com `occurrences` correto
+        const byName = {};
+        for (const d of detSample) {
+          if (!byName[d.name]) byName[d.name] = { name: d.name, pages: new Set(), count: 0 };
+          byName[d.name].count++;
+          if (d.page) byName[d.name].pages.add(d.page);
+        }
+        for (const name in byName) {
+          const g = byName[name];
+          const pageList = Array.from(g.pages).slice(0, 2).join(', ');
+          issues.push({
+            name: g.name,
+            type: 'Detached da library oficial',
+            severity: 'high',
+            occurrences: g.count,
+            recommendation: pageList
+              ? `Re-conectar instâncias em ${pageList}.`
+              : 'Re-conectar à library oficial e reaplicar styles.'
+          });
+        }
+      }
+
+      // 1b. Grupos de duplicados — cada grupo vira uma issue
+      if (usage.duplicateGroups && usage.duplicateGroups.length) {
+        for (const group of usage.duplicateGroups.slice(0, 3)) {
+          const names = group.components.map(c => c.name).join(', ');
+          issues.push({
+            name: group.components[0].name,
+            type: 'Possível variante duplicada',
+            severity: 'med',
+            occurrences: group.components.length,
+            recommendation: `Consolidar: ${names}.`
+          });
+        }
+      }
+
+      // 1c. Componentes não usados — agregamos num único issue resumo
+      if (usage.unused && usage.unused.length) {
+        const examples = usage.unused.slice(0, 3).map(c => c.name).join(', ');
+        issues.push({
+          name: usage.unused[0].name,
+          type: 'Componente sem instâncias',
+          severity: 'low',
+          occurrences: usage.unused.length,
+          recommendation: usage.unused.length > 3
+            ? `Considera deprecar: ${examples} (+${usage.unused.length - 3} outros).`
+            : `Considera deprecar: ${examples}.`
+        });
+      }
+
+      // 1d. Adopção fraca por categoria
+      if (adoption && adoption.byCategory) {
+        const categoryLabels = {
+          fill: 'cor (fill)', stroke: 'borda (stroke)', text: 'texto',
+          effect: 'efeitos', radius: 'radius', spacing: 'spacing'
+        };
+        for (const cat in adoption.byCategory) {
+          const pct = adoption.byCategory[cat];
+          if (pct !== null && pct < 50) {
+            issues.push({
+              name: categoryLabels[cat] || cat,
+              type: `Baixa adopção em ${categoryLabels[cat] || cat}`,
+              severity: pct < 25 ? 'high' : 'med',
+              occurrences: 100 - pct,
+              recommendation: `Apenas ${pct}% das decisões usam tokens. Cria/aplica Variables.`
+            });
+          }
+        }
+      }
+
+      // Ordena por severidade e corta no top 6
+      const sevOrder = { high: 0, med: 1, low: 2 };
+      issues.sort((a, b) => sevOrder[a.severity] - sevOrder[b.severity]);
+      const finalIssues = issues.slice(0, 6);
+
+      // ---------- 2. INSIGHTS (cards laterais) ----------
+      // Cada insight é uma observação sobre os dados, com tom:
+      // positive (verde) / info (cinza) / warning (âmbar) / danger (vermelho).
+      const insights = [];
+
+      if (adoption) {
+        if (adoption.overall >= 85) {
+          insights.push({
+            tone: 'positive', title: 'Adopção exemplar',
+            detail: `${adoption.overall}% das decisões de design usam tokens — sistema muito bem aplicado.`
+          });
+        } else if (adoption.overall < 40) {
+          insights.push({
+            tone: 'danger', title: 'Adopção baixa',
+            detail: `Apenas ${adoption.overall}% das decisões usam tokens. A maioria do produto vive em hardcoded.`
+          });
+        }
+
+        // Insight por categoria mais forte
+        if (adoption.byCategory) {
+          const cats = Object.entries(adoption.byCategory).filter(([_, v]) => v !== null);
+          if (cats.length) {
+            const [bestCat, bestVal] = cats.reduce((a, b) => a[1] >= b[1] ? a : b);
+            const [worstCat, worstVal] = cats.reduce((a, b) => a[1] <= b[1] ? a : b);
+
+            if (bestVal >= 80) {
+              const catLabel = { fill: 'cor', stroke: 'bordas', text: 'texto', effect: 'efeitos', radius: 'radius', spacing: 'spacing' }[bestCat] || bestCat;
+              insights.push({
+                tone: 'positive', title: `${catLabel.charAt(0).toUpperCase() + catLabel.slice(1)} sólida`,
+                detail: `${bestVal}% das decisões de ${catLabel} usam tokens — fundamento estável.`
+              });
+            }
+
+            if (worstVal !== null && worstVal < 30 && worstCat !== bestCat) {
+              const catLabel = { fill: 'cor', stroke: 'bordas', text: 'texto', effect: 'efeitos', radius: 'radius', spacing: 'spacing' }[worstCat] || worstCat;
+              insights.push({
+                tone: 'warning', title: `${catLabel.charAt(0).toUpperCase() + catLabel.slice(1)} em défice`,
+                detail: `Só ${worstVal}% das decisões de ${catLabel} usam tokens. Área prioritária.`
+              });
+            }
+          }
+        }
+      }
+
+      if (detached > 50) {
+        insights.push({
+          tone: 'danger', title: 'Muitos detached',
+          detail: `${detached} instâncias detached detectadas — drift visual provável.`
+        });
+      } else if (detached > 10) {
+        insights.push({
+          tone: 'warning', title: 'Detached a monitorizar',
+          detail: `${detached} instâncias detached — não crítico mas merece atenção.`
+        });
+      } else if (detached === 0) {
+        insights.push({
+          tone: 'positive', title: 'Zero detached',
+          detail: 'Nenhuma instância detached detectada — disciplina de instâncias exemplar.'
+        });
+      }
+
+      if (unusedCount >= 10) {
+        insights.push({
+          tone: 'info', title: 'Library inflacionada',
+          detail: `${unusedCount} componentes nunca usados. Vale a pena rever a library.`
+        });
+      } else if (unusedCount > 0 && unusedCount < 5) {
+        insights.push({
+          tone: 'info', title: 'Library limpa',
+          detail: `Apenas ${unusedCount} componente${unusedCount === 1 ? '' : 's'} sem uso.`
+        });
+      }
+
+      if (duplicates >= 3) {
+        insights.push({
+          tone: 'warning', title: 'Duplicados detectados',
+          detail: `${duplicates} grupos de variantes potencialmente duplicadas. Consolidar reduz manutenção.`
+        });
+      }
+
+      // Garantir pelo menos 1 insight, no máximo 4
+      const finalInsights = insights.slice(0, 4);
+      if (!finalInsights.length) {
+        finalInsights.push({
+          tone: 'info', title: 'Análise concluída',
+          detail: 'Não foram detectados sinais significativos para destacar.'
+        });
+      }
+
+      // ---------- 3. PRIORIDADES (lista accionável) ----------
+      // Cada prioridade tem text + impact. O impacto é calculado a partir
+      // das mesmas fórmulas que o Health Score — coerente.
+      const priorities = [];
+
+      if (detached > 0) {
+        // Mesma fórmula da computeHealthScore
+        const impact = Math.min(25, detached * 0.3);
+        priorities.push({
+          text: detached === 1
+            ? 'Re-conectar 1 instância detached'
+            : `Re-conectar ${detached} instâncias detached`,
+          impact: `+${Math.round(impact)} no score`,
+          weight: impact
+        });
+      }
+
+      if (adoption && adoption.byCategory) {
+        // Procura a categoria com mais espaço para crescer
+        const cats = Object.entries(adoption.byCategory).filter(([_, v]) => v !== null && v < 80);
+        if (cats.length) {
+          const [worstCat, worstVal] = cats.reduce((a, b) => a[1] <= b[1] ? a : b);
+          const catLabel = { fill: 'cor', stroke: 'bordas', text: 'texto', effect: 'efeitos', radius: 'radius', spacing: 'spacing' }[worstCat] || worstCat;
+          // Subir adopção 20pts melhora o overall ~3-5pts dependendo do peso
+          const estImpact = Math.min(10, (80 - worstVal) * 0.15);
+          priorities.push({
+            text: `Aplicar tokens de ${catLabel} (${worstVal}% → meta 80%)`,
+            impact: `+${Math.round(estImpact)} no score`,
+            weight: estImpact
+          });
+        }
+      }
+
+      if (duplicates > 0) {
+        const impact = Math.min(15, duplicates * 2);
+        priorities.push({
+          text: duplicates === 1
+            ? 'Consolidar 1 grupo de variantes duplicadas'
+            : `Consolidar ${duplicates} grupos de variantes duplicadas`,
+          impact: `+${Math.round(impact)} no score`,
+          weight: impact
+        });
+      }
+
+      if (unusedCount >= 5) {
+        const impact = Math.min(15, unusedCount * 0.5);
+        priorities.push({
+          text: `Deprecar ${unusedCount} componentes sem uso`,
+          impact: `+${Math.round(impact)} no score`,
+          weight: impact
+        });
+      }
+
+      // Always-present priority (longo prazo) — só se houver pelo menos 1 acção
+      if (priorities.length) {
+        priorities.push({
+          text: 'Documentar guidelines de uso da library',
+          impact: 'Saúde a longo prazo',
+          weight: 0
+        });
+      }
+
+      // Ordena por impacto desc, top 5
+      priorities.sort((a, b) => b.weight - a.weight);
+      const finalPriorities = priorities.slice(0, 5).map(({ text, impact }) => ({ text, impact }));
+
+      // Empty fallback
+      const safeIssues = finalIssues.length ? finalIssues : [{
+        name: '—', type: 'Sem problemas críticos detectados',
+        severity: 'low', occurrences: 0,
+        recommendation: 'Continua a manter o sistema. Próxima análise revela tendências.'
+      }];
+      const safePriorities = finalPriorities.length ? finalPriorities : [{
+        text: 'Manter as práticas actuais',
+        impact: 'Sistema saudável'
+      }];
+
+      return {
+        issues: safeIssues,
+        insights: finalInsights,
+        priorities: safePriorities
+      };
+    }
+
+    // Gera um dataset completo para o dashboard (sintético — fallback)
     function generateAnalysis() {
       const score = randInt(58, 92); // intervalo "interessante" para o MVP
       const totalComponents = randInt(120, 280);
@@ -3561,6 +3941,24 @@
          o user vê tudo populado, mesmo durante desenvolvimento. */
       const data = realData ? { ...synthetic, ...mergeRealIntoData(realData, synthetic) } : synthetic;
 
+      /* Health Score real — calculado a partir dos sinais reais
+         que já vivem em `data`. Substitui o score sintético do
+         `synthetic.score`. Se não há dados reais suficientes,
+         computeHealthScore() devolve o score sintético original. */
+      const realScore = computeHealthScore(data);
+      data.score  = realScore;
+      data.status = getStatusFromScore(realScore);
+
+      /* Issues / Insights / Priorities reais — gerados a partir
+         dos sinais reais. Se a função devolve null (sem dados
+         suficientes), mantemos os pools sintéticos. */
+      const realInsights = generateRealInsights(data);
+      if (realInsights) {
+        data.issues     = realInsights.issues;
+        data.insights   = realInsights.insights;
+        data.priorities = realInsights.priorities;
+      }
+
       // --- Título editável: usa o nome do user, ou sugere um. ---
       const titleEl = $('#analysis-title-text');
       const analysisName = (customName && customName.length)
@@ -3572,8 +3970,12 @@
       // Marca o momento da análise — o label faz auto-refresh a cada 30s
       // para evoluir de "agora mesmo" → "há 1 min" → "Hoje, 14:32" etc.
       setLastAnalysis(new Date());
+      /* Confiança da análise reflete a *qualidade dos dados*, não a
+         saúde do sistema. Se temos dados reais da função Netlify,
+         confiança Alta. Se caímos em sintéticos, confiança Baixa. */
+      const isRealAnalysis = !!realData;
       $('#confidence-label').innerHTML =
-        'Confiança da análise: <strong>' + (data.score >= 75 ? 'Alta' : data.score >= 55 ? 'Média' : 'Baixa') + '</strong>';
+        'Confiança da análise: <strong>' + (isRealAnalysis ? 'Alta' : 'Baixa (dados sintéticos)') + '</strong>';
 
       // --- Health Score ring (anima de 0 → score) ---
       const ring = $('#score-ring');
@@ -3598,16 +4000,87 @@
       animateNumber($('#score-value'), 0, data.score, 1100);
       $('#status-title').textContent = data.status.label;
       $('#status-description').textContent = data.status.description;
-      $('#analyzed-count').textContent = data.analyzedNodes + ' nós';
+
+      /* Badge "Analisados X nós · Y páginas" — agora real.
+         Formatamos números grandes com separador de milhar (1.247 nós)
+         para melhor leitura em ficheiros grandes. Locale 'pt-PT' usa
+         ponto como separador. */
+      const nodesFormatted = (data.analyzedNodes || 0).toLocaleString('pt-PT');
+      $('#analyzed-count').textContent = nodesFormatted + ' nós';
+      $('#pages-count').textContent    = data.pages;
 
       // --- Metric cards ---
       $('#m-coverage').textContent        = data.coverage + '%';
-      $('#m-inconsistencies').textContent = data.inconsistencies;
+
+      /* Inconsistências = soma de 4 sinais reais.
+         Fonte de cada parte:
+           - detached:        já real
+           - duplicates:      grupos de duplicados (já real)
+           - unused:          componentes com 0 instâncias (já real)
+           - adoptionDeficit: 100 - adoption.overall (penaliza baixa adopção)
+
+         O cálculo só roda valores reais quando existem; se um sinal não
+         chegou (ex: análise sintética), simplesmente entra como 0 — o
+         número total fica subestimado mas nunca inflacionado. */
+      const adoptionDeficit = data.realAdoption && typeof data.realAdoption.overall === 'number'
+        ? Math.max(0, 100 - data.realAdoption.overall)
+        : 0;
+      const unusedCount     = (data.componentUsage && data.componentUsage.summary)
+        ? (data.componentUsage.summary.unusedCount || 0)
+        : 0;
+      const inconsistenciesReal =
+            (data.detached   || 0)
+          + (data.duplicates || 0)
+          + unusedCount
+          + adoptionDeficit;
+
+      $('#m-inconsistencies').textContent = inconsistenciesReal;
+
+      // Tooltip nativo via title (mostra breakdown ao passar rato).
+      // Cada componente só aparece se for > 0, evita ruído ("0 detached · 0 duplicados...").
+      const parts = [];
+      if (data.detached   > 0) parts.push(`${data.detached} detached`);
+      if (data.duplicates > 0) parts.push(`${data.duplicates} duplicados`);
+      if (unusedCount     > 0) parts.push(`${unusedCount} não usados`);
+      if (adoptionDeficit > 0) parts.push(`${adoptionDeficit} deficit de adopção`);
+
+      const tooltipText = parts.length
+        ? parts.join(' · ')
+        : 'Nenhuma inconsistência detectada';
+      $('#m-inconsistencies').setAttribute('title', tooltipText);
+
+      // Subtítulo do card — mostra um resumo curto (categoria dominante)
+      const subEl = $('#m-inconsistencies-sub');
+      if (subEl) {
+        if (parts.length === 0) {
+          subEl.textContent = '✓ Sistema sem inconsistências';
+        } else if (parts.length === 1) {
+          subEl.textContent = parts[0];
+        } else {
+          subEl.textContent = `passa o rato para ver detalhe`;
+        }
+      }
+
       $('#m-detached').textContent        = data.detached;
 
       // --- Card componentes ---
       $('#comp-total').textContent       = data.totalComponents;
-      $('#comp-new').textContent         = '+' + data.newThisMonth + ' no último mês';
+
+      /* Subtítulo do "Total" — substituímos o sintético "+X no último mês"
+         por dado real derivado de componentUsage.categories: número de
+         categorias do sistema (prefixos antes do "/") + a maior. */
+      const compNewEl = $('#comp-new');
+      if (data.componentUsage && Array.isArray(data.componentUsage.categories) && data.componentUsage.categories.length) {
+        const cats = data.componentUsage.categories;
+        const topCat = cats[0]; // já vem ordenada por totalInstances desc
+        compNewEl.textContent = cats.length === 1
+          ? `1 categoria · ${topCat.name}`
+          : `${cats.length} categorias · maior: ${topCat.name}`;
+      } else {
+        // Fallback quando não temos dados reais
+        compNewEl.textContent = '+' + (data.newThisMonth || 0) + ' no último mês';
+      }
+
       $('#comp-duplicates').textContent  = data.duplicates;
       $('#comp-detached').textContent    = data.detached;
       $('#comp-tokens').textContent      = data.tokensTotal;
@@ -3885,7 +4358,20 @@
     function renderComponentsPage(data) {
       // KPIs no topo
       $('#comp-page-total').textContent      = data.totalComponents;
-      $('#comp-page-new').textContent        = '+' + data.newThisMonth + ' no último mês';
+
+      // Subtítulo do "Total" — mesma lógica do Overview, coerência
+      // entre os dois sítios que mostram o mesmo conceito.
+      const compPageNewEl = $('#comp-page-new');
+      if (data.componentUsage && Array.isArray(data.componentUsage.categories) && data.componentUsage.categories.length) {
+        const cats = data.componentUsage.categories;
+        const topCat = cats[0];
+        compPageNewEl.textContent = cats.length === 1
+          ? `1 categoria · ${topCat.name}`
+          : `${cats.length} categorias · maior: ${topCat.name}`;
+      } else {
+        compPageNewEl.textContent = '+' + (data.newThisMonth || 0) + ' no último mês';
+      }
+
       $('#comp-page-detached').textContent   = data.detached;
       $('#comp-page-duplicates').textContent = data.duplicates;
       $('#comp-page-health').textContent     = data.compHealth + '%';
@@ -3907,27 +4393,72 @@
       const statusFilter = $('#comp-filter-issue')?.value || 'all';
       const sortBy = $('#comp-sort')?.value || 'usage';
 
-      // Filtragem
+      /* Filtragem — agora alinhada com dados reais:
+         - 'all'      → tudo
+         - 'top'      → top 10 por uso descendente
+         - 'ok'       → status 'good' (saudáveis)
+         - 'duplicate'→ status 'warn' (potenciais duplicados)
+         - 'unused'   → status 'bad' (não usados, 0 instâncias) */
       let filtered = componentsData.filter(c => {
         if (searchTerm && !c.name.toLowerCase().includes(searchTerm)) return false;
-        if (statusFilter !== 'all' && c.status !== statusFilter) return false;
+
+        if (statusFilter === 'ok'        && c.status !== 'good') return false;
+        if (statusFilter === 'duplicate' && c.status !== 'warn') return false;
+        if (statusFilter === 'unused'    && c.status !== 'bad')  return false;
+        // 'top' não filtra aqui — é tratado depois da ordenação
         return true;
       });
 
-      // Ordenação
+      // Ordenação — duas direcções para "uso" (asc/desc)
       const sorters = {
-        usage:  (a, b) => b.usage - a.usage,
-        name:   (a, b) => a.name.localeCompare(b.name),
-        issues: (a, b) => b.issues - a.issues
+        usage:     (a, b) => b.usage - a.usage,
+        'usage-asc': (a, b) => a.usage - b.usage,
+        name:      (a, b) => a.name.localeCompare(b.name),
+        issues:    (a, b) => b.issues - a.issues
       };
-      filtered.sort(sorters[sortBy]);
+      filtered.sort(sorters[sortBy] || sorters.usage);
 
+      // Top 10 — corta depois da ordenação por uso descendente
+      if (statusFilter === 'top') {
+        // Garantir que está ordenado por uso desc, independentemente do sort escolhido
+        filtered = [...filtered].sort((a, b) => b.usage - a.usage).slice(0, 10);
+      }
+
+      /* Contador contextual:
+         Mostra sempre o total filtrado em destaque, e adiciona contexto
+         útil consoante o filtro (ex: "12 não usados" quando o filtro
+         está em 'unused', ou breakdown global em 'all'). */
       $('#comp-list-count').textContent = filtered.length;
+      const ctx = $('#comp-list-context');
+      if (ctx) {
+        if (statusFilter === 'all') {
+          // Breakdown geral — só quando "todos"
+          const unusedTotal    = componentsData.filter(c => c.status === 'bad').length;
+          const duplicateTotal = componentsData.filter(c => c.status === 'warn').length;
+          const parts = [];
+          if (unusedTotal > 0)    parts.push(`${unusedTotal} não usados`);
+          if (duplicateTotal > 0) parts.push(`${duplicateTotal} duplicados`);
+          ctx.textContent = parts.length ? `· ${parts.join(' · ')}` : '';
+        } else if (statusFilter === 'top') {
+          const totalUsage = filtered.reduce((sum, c) => sum + c.usage, 0);
+          ctx.textContent = `· ${totalUsage} instâncias totais`;
+        } else if (statusFilter === 'unused') {
+          ctx.textContent = filtered.length ? '· candidatos a remoção' : '';
+        } else if (statusFilter === 'duplicate') {
+          ctx.textContent = filtered.length ? '· revisar variantes' : '';
+        } else {
+          ctx.textContent = '';
+        }
+      }
 
       const list = $('#components-list');
       if (!filtered.length) {
+        // Empty state contextual ao filtro
+        let emptyMsg = 'Nenhum componente corresponde aos filtros.';
+        if (statusFilter === 'unused')    emptyMsg = '✓ Todos os componentes têm pelo menos uma instância.';
+        if (statusFilter === 'duplicate') emptyMsg = '✓ Nenhum componente potencialmente duplicado detectado.';
         list.innerHTML = `<div class="card card--soft" style="text-align:center; color:var(--text-muted)">
-          Nenhum componente corresponde aos filtros.
+          ${emptyMsg}
         </div>`;
         return;
       }
