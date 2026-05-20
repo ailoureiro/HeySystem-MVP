@@ -1280,7 +1280,11 @@
     /* --- Metric cards (linha de pastéis) --- */
     .metrics {
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
+      /* auto-fit + minmax: adapta-se ao número de cards.
+         3 cards → 3 colunas (~370px cada em desktop)
+         4 cards → 4 colunas (~280px cada em desktop)
+         Em ecrãs pequenos, quebra automaticamente. */
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
       gap: var(--space-4);
       margin-bottom: var(--space-6);
     }
@@ -2531,12 +2535,13 @@
           </div>
         </div>
 
-        <!-- Metric cards (4) -->
+        <!-- Metric cards (3 — removemos "Uso de tokens" porque
+             duplicava Cobertura do DS — ambos vinham de adoption.overall) -->
         <div class="metrics">
           <div class="metric metric--mint fade-in" style="animation-delay:.05s">
             <p class="metric__label">Cobertura do DS</p>
             <p class="metric__value" id="m-coverage">—</p>
-            <span class="metric__trend metric__trend--up">▲ 4% este mês</span>
+            <span class="metric__trend metric__trend--up">Elementos ligados ao sistema</span>
             <svg class="metric__spark" viewBox="0 0 80 36"><path d="M0,28 L12,24 L24,26 L36,18 L48,20 L60,12 L80,8" stroke="#15803D"/></svg>
           </div>
           <div class="metric metric--peach fade-in" style="animation-delay:.1s">
@@ -2544,12 +2549,6 @@
             <p class="metric__value" id="m-inconsistencies">—</p>
             <span class="metric__trend metric__trend--down">▼ 8 vs. análise anterior</span>
             <svg class="metric__spark" viewBox="0 0 80 36"><path d="M0,8 L12,14 L24,10 L36,18 L48,16 L60,22 L80,28" stroke="#B45309"/></svg>
-          </div>
-          <div class="metric metric--sky fade-in" style="animation-delay:.15s">
-            <p class="metric__label">Uso de tokens</p>
-            <p class="metric__value" id="m-tokens">—</p>
-            <span class="metric__trend metric__trend--up">▲ Acima da meta</span>
-            <svg class="metric__spark" viewBox="0 0 80 36"><path d="M0,30 L12,26 L24,28 L36,20 L48,16 L60,14 L80,6" stroke="#0E3FCC"/></svg>
           </div>
           <div class="metric metric--lavender fade-in" style="animation-delay:.2s">
             <p class="metric__label">Componentes detached</p>
@@ -3423,14 +3422,13 @@
       if (typeof real.detached === 'number')        merged.detached = real.detached;
 
       // ETAPA 2 — adoption real
-      // adoption.overall substitui DOIS sintéticos diferentes que
-      // mediam o mesmo conceito (Cobertura DS no Overview, Uso de
-      // tokens % no mesmo Overview). Mantemos o objecto completo
-      // como `realAdoption` para a página Tokens poder mostrar
-      // breakdown por categoria.
+      // adoption.overall alimenta "Cobertura do DS" no Overview.
+      // (O card "Uso de tokens" foi removido por ser redundante —
+      // media exactamente a mesma coisa.) Mantemos o objecto
+      // completo como `realAdoption` para a página Tokens poder
+      // mostrar breakdown por categoria.
       if (real.adoption && typeof real.adoption.overall === 'number') {
         merged.coverage    = real.adoption.overall;
-        merged.tokensUsage = real.adoption.overall;
         merged.realAdoption = real.adoption;
       }
       // fileName é gerido separadamente (vai para o badge no header)
@@ -3505,7 +3503,6 @@
       const duplicates   = randInt(3, 12);
       const overrides    = randInt(20, 60);
       const tokensTotal  = randInt(180, 420);
-      const tokensUsage  = randInt(72, 96);
       const coverage     = randInt(65, 92);
       const inconsistencies = randInt(15, 55);
       const newThisMonth = randInt(2, 14);
@@ -3530,7 +3527,7 @@
 
       return {
         score, status: getStatusFromScore(score),
-        coverage, inconsistencies, tokensUsage, detached,
+        coverage, inconsistencies, detached,
         totalComponents, duplicates, overrides, tokensTotal,
         newThisMonth, compHealth, analyzedNodes, pages,
         issues, insights, priorities
@@ -3594,7 +3591,6 @@
       // --- Metric cards ---
       $('#m-coverage').textContent        = data.coverage + '%';
       $('#m-inconsistencies').textContent = data.inconsistencies;
-      $('#m-tokens').textContent          = data.tokensUsage + '%';
       $('#m-detached').textContent        = data.detached;
 
       // --- Card componentes ---
