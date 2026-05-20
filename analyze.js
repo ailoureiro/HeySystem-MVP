@@ -174,6 +174,22 @@ function transformFigmaData(figmaFile) {
   // que perderam ligação ao componente master.
   const detachedAnalysis = detectDetached(figmaFile);
 
+  // ----- ETAPA 2: Adopção de tokens -----
+  // % de elementos visuais (fills/strokes/effects/text) que usam
+  // styles do design system vs valores hardcoded.
+  // Reaproveita o detector de páginas de documentação.
+  const componentNames = new Set();
+  for (const id in (figmaFile.components || {})) {
+    const name = figmaFile.components[id].name;
+    if (name) componentNames.add(name);
+  }
+  for (const id in (figmaFile.componentSets || {})) {
+    const name = figmaFile.componentSets[id].name;
+    if (name) componentNames.add(name);
+  }
+  const isDocPageFn = makeIsDocumentationPage(componentNames);
+  const adoptionAnalysis = detectTokenAdoption(figmaFile, isDocPageFn);
+
   return {
     fileName:           figmaFile.name,
     lastModified:       figmaFile.lastModified,
@@ -191,6 +207,10 @@ function transformFigmaData(figmaFile) {
       byOrphanInstance: detachedAnalysis.bySignal2Count   // SINAL 2
     },
     detachedSample:     detachedAnalysis.sample,
+
+    // ETAPA 2 — Token adoption (dado REAL)
+    // Percentagens por categoria + overall + contagens absolutas para diagnóstico
+    adoption:           adoptionAnalysis,
 
     // Diagnóstico — decomposição dos styles (tipo + origem)
     stylesBreakdown:    stylesBreakdown,
@@ -230,32 +250,12 @@ function transformFigmaData(figmaFile) {
    Devolvemos contagem + amostra (até 10 ocorrências) para o
    dashboard poder listar exemplos concretos.
    ========================================================= */
-function detectDetached(figmaFile) {
-  // 1. Construir set de nomes de componentes existentes — lookup O(1)
-  // Inclui também os component sets (parents de variantes)
-  const componentNames = new Set();
-  const componentIds   = new Set();
-  for (const id in (figmaFile.components || {})) {
-    componentIds.add(id);
-    const name = figmaFile.components[id].name;
-    if (name) componentNames.add(name);
-  }
-  for (const id in (figmaFile.componentSets || {})) {
-    componentIds.add(id);
-    const name = figmaFile.componentSets[id].name;
-    if (name) componentNames.add(name);
-  }
-
-  /* Heurística para identificar páginas de documentação/exemplos.
-     Estas páginas contêm legitimamente frames com nomes de componentes
-     (variações, estados, contextos de uso) — NÃO são detached reais.
-
-     Sinais que qualificam uma página como "documentação":
-       1. Nome bate certo com um componente existente (ex: página "Tooltip"
-          para documentar o componente "Tooltip")
-       2. Contém keywords típicas de documentação no nome
-       3. Começa com emoji/símbolo (convenção comum: 📑, ⚙️, 🏷️, 📐, etc.) */
-  function isDocumentationPage(pageName) {
+/* Helper: detecta se uma página é de documentação/exemplos.
+   Usado tanto pelo detector de detached como pelo de adopção
+   de tokens, para excluir páginas que legitimamente têm valores
+   hardcoded ou frames com nomes de componentes. */
+function makeIsDocumentationPage(componentNames) {
+  return function isDocumentationPage(pageName) {
     if (!pageName) return false;
     const normalized = pageName.trim().toLowerCase();
 
@@ -274,12 +274,31 @@ function detectDetached(figmaFile) {
     }
 
     // Sinal 3: começa com emoji (heurística de "página especial")
-    // Detecção simples: primeiro char não é letra/número ASCII
     const firstChar = pageName.trim().charAt(0);
     if (firstChar && !/[a-z0-9]/i.test(firstChar)) return true;
 
     return false;
+  };
+}
+
+function detectDetached(figmaFile) {
+  // 1. Construir set de nomes de componentes existentes — lookup O(1)
+  // Inclui também os component sets (parents de variantes)
+  const componentNames = new Set();
+  const componentIds   = new Set();
+  for (const id in (figmaFile.components || {})) {
+    componentIds.add(id);
+    const name = figmaFile.components[id].name;
+    if (name) componentNames.add(name);
   }
+  for (const id in (figmaFile.componentSets || {})) {
+    componentIds.add(id);
+    const name = figmaFile.componentSets[id].name;
+    if (name) componentNames.add(name);
+  }
+
+  // Helper extraído (também usado por detectTokenAdoption)
+  const isDocumentationPage = makeIsDocumentationPage(componentNames);
 
   // 2. Percorrer árvore e procurar os 2 sinais
   const detached = {
@@ -369,6 +388,140 @@ function detectDetached(figmaFile) {
     bySignal1Count: detached.bySignal1.length,
     bySignal2Count: detached.bySignal2.length,
     sample: sample
+  };
+}
+
+/* =========================================================
+   TOKEN ADOPTION — % de elementos que usam tokens vs hardcoded
+   ---------------------------------------------------------
+   Para cada nó com fill/stroke/effect, decide se está a usar
+   um style do design system (= token) ou um valor hardcoded.
+
+   A análise faz-se em 3 categorias separadas:
+     - fill:   cores de preenchimento (cards, backgrounds, etc.)
+     - stroke: cores de borda (inputs, dividers, etc.)
+     - text:   cores de texto (separado por convenção, embora
+               internamente também sejam fills)
+     - effect: sombras, blurs (effects do nó)
+
+   Para evitar duplo-counting, NÃO contamos nós dentro de
+   INSTANCE (essas herdam do master) nem dentro de páginas de
+   documentação (que tipicamente usam hardcoded de propósito).
+   ========================================================= */
+function detectTokenAdoption(figmaFile, isDocPageFn) {
+  // Contadores por categoria
+  const stats = {
+    fill:   { withToken: 0, total: 0 },
+    stroke: { withToken: 0, total: 0 },
+    text:   { withToken: 0, total: 0 },
+    effect: { withToken: 0, total: 0 }
+  };
+
+  // Verifica se um array de fills tem pelo menos um fill visível e sólido.
+  // (Ignora cores transparentes, fills hidden, gradientes, imagens.)
+  function hasVisibleSolidFill(fills) {
+    if (!Array.isArray(fills) || fills.length === 0) return false;
+    return fills.some(f => {
+      if (f.visible === false) return false;
+      if (f.type !== 'SOLID') return false;
+      // Cor invisível (alpha 0) não conta
+      if (f.opacity === 0) return false;
+      if (f.color && f.color.a === 0) return false;
+      return true;
+    });
+  }
+
+  function hasVisibleEffect(effects) {
+    if (!Array.isArray(effects) || effects.length === 0) return false;
+    return effects.some(e => e.visible !== false);
+  }
+
+  function visit(node, insideInstance, isDocPage) {
+    if (!node) return;
+
+    // Páginas de documentação não contam (mesmo critério do detached).
+    // Instâncias herdam decisões do master — contar seria duplo.
+    const shouldCount = !insideInstance && !isDocPage;
+
+    if (shouldCount) {
+      // ----- FILL -----
+      if (hasVisibleSolidFill(node.fills)) {
+        // Texto e outros tipos contam em categorias diferentes
+        const category = node.type === 'TEXT' ? 'text' : 'fill';
+        stats[category].total++;
+        // node.styles.fill aponta para um style ID se há token aplicado
+        if (node.styles && node.styles.fill) {
+          stats[category].withToken++;
+        } else if (node.type === 'TEXT' && node.styles && node.styles.fills) {
+          // Algumas versões da API usam 'fills' (plural) para text
+          stats[category].withToken++;
+        }
+      }
+
+      // ----- STROKE -----
+      if (hasVisibleSolidFill(node.strokes)) {
+        stats.stroke.total++;
+        if (node.styles && node.styles.stroke) {
+          stats.stroke.withToken++;
+        } else if (node.styles && node.styles.strokes) {
+          stats.stroke.withToken++;
+        }
+      }
+
+      // ----- EFFECT (sombras, blurs) -----
+      if (hasVisibleEffect(node.effects)) {
+        stats.effect.total++;
+        if (node.styles && (node.styles.effect || node.styles.effects)) {
+          stats.effect.withToken++;
+        }
+      }
+    }
+
+    // Recursão
+    if (Array.isArray(node.children)) {
+      const childInsideInstance = insideInstance || node.type === 'INSTANCE';
+      for (const child of node.children) {
+        let nextIsDoc = isDocPage;
+        if (node.type === 'CANVAS') {
+          nextIsDoc = isDocPageFn(node.name);
+        }
+        visit(child, childInsideInstance, nextIsDoc);
+      }
+    }
+  }
+
+  visit(figmaFile.document, false, false);
+
+  // Calcula percentagens
+  const percentage = (s) => s.total === 0 ? 0 : Math.round((s.withToken / s.total) * 100);
+
+  const byCategory = {
+    fill:   percentage(stats.fill),
+    stroke: percentage(stats.stroke),
+    text:   percentage(stats.text),
+    effect: percentage(stats.effect)
+  };
+
+  // Overall = média ponderada pelo nº de decisões em cada categoria
+  // (mais justo que média simples — uma categoria com poucos casos
+  // não distorce o número)
+  const totalDecisions = stats.fill.total + stats.stroke.total + stats.text.total + stats.effect.total;
+  const totalWithToken = stats.fill.withToken + stats.stroke.withToken + stats.text.withToken + stats.effect.withToken;
+  const overall = totalDecisions === 0 ? 0 : Math.round((totalWithToken / totalDecisions) * 100);
+
+  return {
+    overall,
+    byCategory,
+    totals: {
+      fillsWithToken:   stats.fill.withToken,
+      fillsTotal:       stats.fill.total,
+      strokesWithToken: stats.stroke.withToken,
+      strokesTotal:     stats.stroke.total,
+      textsWithToken:   stats.text.withToken,
+      textsTotal:       stats.text.total,
+      effectsWithToken: stats.effect.withToken,
+      effectsTotal:     stats.effect.total
+    }
   };
 }
 
