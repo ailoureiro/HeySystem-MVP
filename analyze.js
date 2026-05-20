@@ -190,6 +190,10 @@ function transformFigmaData(figmaFile) {
   const isDocPageFn = makeIsDocumentationPage(componentNames);
   const adoptionAnalysis = detectTokenAdoption(figmaFile, isDocPageFn);
 
+  // ----- ETAPA 2: Uso de componentes (3 análises numa só) -----
+  // Top usados, não usados, e duplicados potenciais.
+  const usageAnalysis = detectComponentUsage(figmaFile);
+
   return {
     fileName:           figmaFile.name,
     lastModified:       figmaFile.lastModified,
@@ -211,6 +215,11 @@ function transformFigmaData(figmaFile) {
     // ETAPA 2 — Token adoption (dado REAL)
     // Percentagens por categoria + overall + contagens absolutas para diagnóstico
     adoption:           adoptionAnalysis,
+
+    // ETAPA 2 — Componentes mais usados / não usados / duplicados (dado REAL)
+    componentUsage:     usageAnalysis,
+    duplicates:         usageAnalysis.summary.duplicateGroupCount,
+    unusedComponentsCount: usageAnalysis.summary.unusedCount,
 
     // Diagnóstico — decomposição dos styles (tipo + origem)
     stylesBreakdown:    stylesBreakdown,
@@ -622,6 +631,215 @@ function detectTokenAdoption(figmaFile, isDocPageFn) {
       radiusTotal:       stats.radius.total,
       spacingWithToken:  stats.spacing.withToken,
       spacingTotal:      stats.spacing.total
+    }
+  };
+}
+
+/* =========================================================
+   COMPONENT USAGE — 3 análises numa só travessia
+   ---------------------------------------------------------
+   Percorre a árvore uma vez e produz:
+     1. Top componentes mais usados (com contagem de instâncias)
+     2. Componentes nunca usados (zero instâncias)
+     3. Componentes potencialmente duplicados (heurística)
+
+   Eficiente: O(N) na árvore + O(C²) na detecção de duplicados,
+   onde C = número de componentes (centenas, não milhares).
+   ========================================================= */
+function detectComponentUsage(figmaFile) {
+  // ----- 1. Construir mapa de componentes (id → metadata) -----
+  // Inclui componentes individuais E component sets.
+  // Para variantes (componente dentro de component set),
+  // agregamos a contagem ao set parente — ver lógica abaixo.
+
+  const components = figmaFile.components || {};
+  const componentSets = figmaFile.componentSets || {};
+
+  // Mapa principal: nodeId → { name, instanceCount, parentSetId, dimensions, remote }
+  const componentMap = {};
+
+  for (const id in components) {
+    const c = components[id];
+    componentMap[id] = {
+      id,
+      name: c.name || '(sem nome)',
+      instanceCount: 0,
+      parentSetId: c.componentSetId || null,
+      remote: !!c.remote,
+      type: 'COMPONENT'
+    };
+  }
+  for (const id in componentSets) {
+    const cs = componentSets[id];
+    componentMap[id] = {
+      id,
+      name: cs.name || '(sem nome)',
+      instanceCount: 0,
+      parentSetId: null,
+      remote: !!cs.remote,
+      type: 'COMPONENT_SET',
+      variants: []  // preenchido abaixo
+    };
+  }
+  // Liga variantes aos seus sets
+  for (const id in componentMap) {
+    const c = componentMap[id];
+    if (c.parentSetId && componentMap[c.parentSetId]) {
+      componentMap[c.parentSetId].variants.push(id);
+    }
+  }
+
+  // Também precisamos das dimensões reais de cada componente
+  // (para detecção de duplicados). Estas vivem na árvore, não
+  // no objecto figmaFile.components. Vamos buscá-las na travessia.
+
+  // ----- 2. Travessia: contar instâncias e capturar dimensões -----
+  function visit(node) {
+    if (!node) return;
+
+    // INSTANCE → incrementar contagem no componente correspondente
+    if (node.type === 'INSTANCE' && node.componentId) {
+      const targetId = node.componentId;
+      if (componentMap[targetId]) {
+        componentMap[targetId].instanceCount++;
+        // Se a instância aponta para uma variante, contar também no set
+        const parent = componentMap[targetId].parentSetId;
+        if (parent && componentMap[parent]) {
+          componentMap[parent].instanceCount++;
+        }
+      }
+    }
+
+    // COMPONENT / COMPONENT_SET → capturar dimensões reais
+    if ((node.type === 'COMPONENT' || node.type === 'COMPONENT_SET') && componentMap[node.id]) {
+      if (node.absoluteBoundingBox) {
+        componentMap[node.id].width  = Math.round(node.absoluteBoundingBox.width);
+        componentMap[node.id].height = Math.round(node.absoluteBoundingBox.height);
+      }
+    }
+
+    // Recursão
+    if (Array.isArray(node.children)) {
+      for (const child of node.children) visit(child);
+    }
+  }
+  visit(figmaFile.document);
+
+  // ----- 3. TOP USED — ordenar por contagem descendente -----
+  // Para a lista do dashboard, preferimos COMPONENT_SETs (uma linha
+  // por "componente lógico") em vez de variantes individuais. Mas
+  // mantemos COMPONENTs soltos (sem parentSet) também.
+  const topUsedCandidates = Object.values(componentMap).filter(c => {
+    // Inclui apenas componentes locais (não remotos) para a lista
+    if (c.remote) return false;
+    // Exclui variantes — já contadas no set parente
+    if (c.parentSetId) return false;
+    return true;
+  });
+
+  const topUsed = topUsedCandidates
+    .map(c => ({
+      id: c.id,
+      name: c.name,
+      instanceCount: c.instanceCount,
+      type: c.type,
+      variants: c.variants ? c.variants.length : 0
+    }))
+    .sort((a, b) => b.instanceCount - a.instanceCount)
+    .slice(0, 50);  // top 50 — frontend pode mostrar 20, 30, etc.
+
+  // ----- 4. UNUSED — componentes com 0 instâncias -----
+  // Mesma lógica: ignorar remotos e variantes individuais.
+  const unused = topUsedCandidates
+    .filter(c => c.instanceCount === 0)
+    .map(c => ({
+      id: c.id,
+      name: c.name,
+      type: c.type
+    }))
+    .slice(0, 30);  // até 30 candidatos a deprecation
+
+  // ----- 5. DUPLICATES — heurística baseada em sufixos e dimensões -----
+  // Sinais que indicam potencial duplicado:
+  //   A) Sufixo suspeito (-2, copy, " 2", " (1)", etc.)
+  //   B) Mesmas dimensões + nome muito parecido
+  //
+  // Estratégia: agrupar componentes por nome "normalizado".
+  // Se 2+ caem no mesmo grupo → suspeitos de duplicado.
+
+  // Função para normalizar nomes removendo sufixos suspeitos
+  function normalizeName(name) {
+    return name
+      .toLowerCase()
+      .replace(/\s*[-_]?\s*copy(\s*\d*)?\s*$/i, '')      // "copy", "copy 2"
+      .replace(/\s*[-_]?\s*\(\d+\)\s*$/, '')             // "(1)", "(2)"
+      .replace(/\s*[-_]\s*\d+\s*$/, '')                  // "-2", "_3"
+      .replace(/\s+\d+\s*$/, '')                         // " 2" no fim
+      .trim();
+  }
+
+  // Agrupa por nome normalizado
+  const normalizedGroups = {};
+  for (const c of topUsedCandidates) {
+    const norm = normalizeName(c.name);
+    if (!norm) continue;
+    if (!normalizedGroups[norm]) normalizedGroups[norm] = [];
+    normalizedGroups[norm].push(c);
+  }
+
+  // Filtra grupos com 2+ candidatos → suspeitos de duplicado
+  const duplicateGroups = [];
+  for (const norm in normalizedGroups) {
+    const group = normalizedGroups[norm];
+    if (group.length < 2) continue;
+
+    // Sinais extra de confiança:
+    //  - Dimensões iguais reforça a hipótese
+    //  - Diferença grande em uso (um muito usado, outro com 0/1) reforça
+    const widths = group.map(c => c.width).filter(w => w);
+    const sameDimensions = widths.length >= 2 && widths.every(w => w === widths[0]);
+
+    duplicateGroups.push({
+      normalizedName: norm,
+      components: group.map(c => ({
+        id: c.id,
+        name: c.name,
+        instanceCount: c.instanceCount,
+        width: c.width,
+        height: c.height
+      })),
+      signals: {
+        sameDimensions,
+        suffixVariation: true  // sempre verdade se chegou aqui
+      }
+    });
+  }
+
+  // ----- 6. CATEGORIES — agrupar componentes por prefixo de nome -----
+  // Ex: "Button/Primary" e "Button/Secondary" → categoria "Button"
+  const categoryCount = {};
+  for (const c of topUsedCandidates) {
+    const category = c.name.split('/')[0].trim() || 'Outros';
+    if (!categoryCount[category]) categoryCount[category] = { count: 0, totalInstances: 0 };
+    categoryCount[category].count++;
+    categoryCount[category].totalInstances += c.instanceCount;
+  }
+  const categories = Object.entries(categoryCount)
+    .map(([name, stats]) => ({ name, ...stats }))
+    .sort((a, b) => b.totalInstances - a.totalInstances);
+
+  return {
+    topUsed,              // top 50 mais usados
+    unused,               // até 30 não usados
+    duplicateGroups,      // grupos de potenciais duplicados
+    categories,           // agregação por prefixo "Button/", "Card/", etc.
+    summary: {
+      totalLocalComponents:    topUsedCandidates.length,
+      unusedCount:             topUsedCandidates.filter(c => c.instanceCount === 0).length,
+      duplicateGroupCount:     duplicateGroups.length,
+      duplicateComponentCount: duplicateGroups.reduce((sum, g) => sum + g.components.length, 0),
+      // Total de instâncias é útil para contexto
+      totalInstances:          topUsedCandidates.reduce((sum, c) => sum + c.instanceCount, 0)
     }
   };
 }

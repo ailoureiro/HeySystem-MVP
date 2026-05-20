@@ -3431,6 +3431,18 @@
         merged.coverage    = real.adoption.overall;
         merged.realAdoption = real.adoption;
       }
+
+      // ETAPA 2 — duplicates real (grupos de componentes suspeitos)
+      if (typeof real.duplicates === 'number') {
+        merged.duplicates = real.duplicates;
+      }
+
+      // ETAPA 2 — componentUsage (top usados, não usados, duplicados)
+      // Passamos o objecto inteiro para o frontend poder render a lista,
+      // os componentes não usados, e identificar duplicados específicos.
+      if (real.componentUsage) {
+        merged.componentUsage = real.componentUsage;
+      }
       // fileName é gerido separadamente (vai para o badge no header)
       return merged;
     }
@@ -3772,17 +3784,72 @@
       { name: 'Sidebar / Default',    category: 'Nav',     initials: 'SB', avatar: 'blue' }
     ];
 
-    function generateComponentsList() {
-      // Para cada componente do pool, sortear uso/issues/status
+    /* Gera lista de componentes para a tabela híbrida.
+       Quando temos dados reais da função Netlify (componentUsage.topUsed),
+       usamos esses — cada item passa a ser um componente real do
+       teu ficheiro Figma. Caso contrário, fallback para o pool mock. */
+    function generateComponentsList(realUsage) {
+      // CAMINHO REAL — usa topUsed da função Netlify
+      if (realUsage && Array.isArray(realUsage.topUsed) && realUsage.topUsed.length) {
+        // Lookup rápido para identificar não-usados (status 'bad')
+        const unusedIds = new Set((realUsage.unused || []).map(c => c.id));
+
+        // Lookup para identificar componentes em grupos de duplicados (status 'warn')
+        const duplicateIds = new Set();
+        for (const group of (realUsage.duplicateGroups || [])) {
+          for (const comp of group.components) duplicateIds.add(comp.id);
+        }
+
+        return realUsage.topUsed.map(c => {
+          // Derivar status: não-usado é o pior; duplicado merece aviso;
+          // resto saudável
+          let status, issues;
+          if (unusedIds.has(c.id))      { status = 'bad';  issues = 1; }
+          else if (duplicateIds.has(c.id)) { status = 'warn'; issues = 1; }
+          else                           { status = 'good'; issues = 0; }
+
+          // Derivar categoria do nome (prefixo antes do "/")
+          const category = (c.name.split('/')[0] || 'Outros').trim();
+
+          // Gerar iniciais para o avatar (mesma convenção do mock)
+          const initials = c.name
+            .split('/')
+            .map(part => part.trim()[0])
+            .filter(Boolean)
+            .join('')
+            .slice(0, 2)
+            .toUpperCase() || '??';
+
+          // Cor do avatar — derivada determinísticamente do nome
+          // (não muda entre análises) para coerência visual
+          const palette = ['blue', 'violet', 'green', 'amber', 'red'];
+          let hash = 0;
+          for (let i = 0; i < c.name.length; i++) hash = (hash * 31 + c.name.charCodeAt(i)) >>> 0;
+          const avatar = palette[hash % palette.length];
+
+          return {
+            name: c.name,
+            category,
+            initials,
+            avatar,
+            usage: c.instanceCount,
+            issues,
+            status,
+            lastModified: '—'   // Não temos info real de "modificado há X dias"
+                                // sem outro endpoint (versions). Placeholder.
+          };
+        });
+      }
+
+      // FALLBACK — pool sintético
       return componentsPool.map(c => {
         const usage  = randInt(3, 240);
         const issues = randInt(0, 12);
-        // Status derivado dos issues — coerente com a metáfora visual
         let status;
         if (issues === 0)      status = 'good';
         else if (issues < 5)   status = 'warn';
         else                   status = 'bad';
-        const lastModified = randInt(1, 30); // dias
+        const lastModified = randInt(1, 30);
         return { ...c, usage, issues, status, lastModified };
       });
     }
@@ -3823,8 +3890,10 @@
       $('#comp-page-duplicates').textContent = data.duplicates;
       $('#comp-page-health').textContent     = data.compHealth + '%';
 
-      // Gera datasets separados desta página
-      componentsData = generateComponentsList();
+      // Gera datasets separados desta página.
+      // generateComponentsList aceita dados reais (data.componentUsage) e
+      // se existirem usa-os; caso contrário fallback para o pool mock.
+      componentsData = generateComponentsList(data.componentUsage);
       heatmapData    = generateHeatmapData();
       activityData   = generateActivityFeed();
 
@@ -3863,12 +3932,18 @@
         return;
       }
 
-      list.innerHTML = filtered.map(c => `
+      list.innerHTML = filtered.map(c => {
+        // Quando temos data de modificação real (número), mostramos; caso
+        // contrário mostramos só a categoria.
+        const metaLine = (typeof c.lastModified === 'number')
+          ? `${c.category} · modificado há ${c.lastModified} ${c.lastModified === 1 ? 'dia' : 'dias'}`
+          : c.category;
+        return `
         <div class="hybrid-item" role="button" tabindex="0">
           <div class="hybrid-item__avatar hybrid-item__avatar--${c.avatar}">${c.initials}</div>
           <div class="hybrid-item__info">
             <p class="hybrid-item__name">${c.name}</p>
-            <div class="hybrid-item__meta">${c.category} · modificado há ${c.lastModified} ${c.lastModified === 1 ? 'dia' : 'dias'}</div>
+            <div class="hybrid-item__meta">${metaLine}</div>
           </div>
           <div class="hybrid-item__metric">
             <div class="hybrid-item__metric-value">${c.usage}</div>
@@ -3880,7 +3955,7 @@
           </div>
           <div class="hybrid-item__status hybrid-item__status--${c.status}" title="Estado: ${c.status}"></div>
         </div>
-      `).join('');
+      `;}).join('');
     }
 
     function renderHeatmap() {
