@@ -246,6 +246,41 @@ function detectDetached(figmaFile) {
     if (name) componentNames.add(name);
   }
 
+  /* Heurística para identificar páginas de documentação/exemplos.
+     Estas páginas contêm legitimamente frames com nomes de componentes
+     (variações, estados, contextos de uso) — NÃO são detached reais.
+
+     Sinais que qualificam uma página como "documentação":
+       1. Nome bate certo com um componente existente (ex: página "Tooltip"
+          para documentar o componente "Tooltip")
+       2. Contém keywords típicas de documentação no nome
+       3. Começa com emoji/símbolo (convenção comum: 📑, ⚙️, 🏷️, 📐, etc.) */
+  function isDocumentationPage(pageName) {
+    if (!pageName) return false;
+    const normalized = pageName.trim().toLowerCase();
+
+    // Sinal 1: nome (trimmed) bate certo com um componente
+    if (componentNames.has(pageName.trim())) return true;
+
+    // Sinal 2: keywords de documentação
+    const docKeywords = [
+      'cover', 'docs', 'documentation', 'doc ', '(doc', '[doc',
+      'examples', 'specs', 'guidelines', 'playground', 'sandbox',
+      'archive', 'archived', 'draft', 'wip', '(wip', '[wip',
+      'reference', 'references', 'usage', 'anatomy'
+    ];
+    for (const kw of docKeywords) {
+      if (normalized.includes(kw)) return true;
+    }
+
+    // Sinal 3: começa com emoji (heurística de "página especial")
+    // Detecção simples: primeiro char não é letra/número ASCII
+    const firstChar = pageName.trim().charAt(0);
+    if (firstChar && !/[a-z0-9]/i.test(firstChar)) return true;
+
+    return false;
+  }
+
   // 2. Percorrer árvore e procurar os 2 sinais
   const detached = {
     bySignal1: [],   // frames com nome de componente
@@ -253,13 +288,39 @@ function detectDetached(figmaFile) {
     total: 0
   };
 
-  function visit(node, pagePath) {
+  /* FILTROS para reduzir falsos positivos do Sinal 1:
+
+     Um frame só é "suspeito de detached" se:
+     A) Não está dentro de outro componente (frames internos de
+        componentes vão ter nomes técnicos parecidos com componentes)
+     B) Não está dentro de uma INSTANCE (filhos de instâncias
+        podem reflectir estrutura interna do componente)
+     C) Não está dentro de um COMPONENT_SET (frames de variantes)
+
+     Implementação: passamos `insideComponent` como flag durante
+     a travessia, e só consideramos detached se a flag for false. */
+
+  function visit(node, pagePath, insideComponent, isDocPage) {
     if (!node) return;
 
-    // SINAL 1: FRAME com nome que corresponde a um componente
-    // (filtro extra: ignorar frames muito grandes — pages, sections —
-    //  que coincidentemente tenham nomes parecidos)
-    if (node.type === 'FRAME' && componentNames.has(node.name)) {
+    // Tipos que "contaminam" os filhos — qualquer frame lá dentro
+    // não pode ser considerado detached pelo Sinal 1.
+    const isComponentContext = (
+      node.type === 'COMPONENT' ||
+      node.type === 'COMPONENT_SET' ||
+      node.type === 'INSTANCE'
+    );
+
+    // SINAL 1: FRAME com nome de componente,
+    // MAS apenas se não estiver:
+    //   - dentro de outro componente
+    //   - numa página de documentação
+    if (
+      node.type === 'FRAME' &&
+      componentNames.has(node.name) &&
+      !insideComponent &&
+      !isDocPage
+    ) {
       detached.bySignal1.push({
         name: node.name,
         nodeId: node.id,
@@ -281,15 +342,22 @@ function detectDetached(figmaFile) {
 
     // Recursão para filhos
     if (Array.isArray(node.children)) {
+      const childInsideComponent = insideComponent || isComponentContext;
       for (const child of node.children) {
-        // Se entramos numa CANVAS (página), actualizamos o path
-        const nextPath = node.type === 'CANVAS' ? node.name : pagePath;
-        visit(child, nextPath);
+        // Ao entrar numa CANVAS (página), actualizamos path E avaliamos
+        // se é página de documentação.
+        let nextPath  = pagePath;
+        let nextIsDoc = isDocPage;
+        if (node.type === 'CANVAS') {
+          nextPath  = node.name;
+          nextIsDoc = isDocumentationPage(node.name);
+        }
+        visit(child, nextPath, childInsideComponent, nextIsDoc);
       }
     }
   }
 
-  visit(figmaFile.document, 'root');
+  visit(figmaFile.document, 'root', false, false);
 
   detached.total = detached.bySignal1.length + detached.bySignal2.length;
 
