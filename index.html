@@ -3411,8 +3411,9 @@
        Hoje vêm reais:
          - totalComponents, tokensTotal (ETAPA 1)
          - detached (ETAPA 2)
+         - adoption (% real de uso de tokens — ETAPA 2)
        Por implementar:
-         - duplicates, overrides, healthScore, coverage, etc.
+         - duplicates, overrides, healthScore, etc.
     */
     function mergeRealIntoData(real, synthetic) {
       const merged = {};
@@ -3420,6 +3421,18 @@
       if (typeof real.tokensTotal === 'number')     merged.tokensTotal = real.tokensTotal;
       // ETAPA 2 — detached real
       if (typeof real.detached === 'number')        merged.detached = real.detached;
+
+      // ETAPA 2 — adoption real
+      // adoption.overall substitui DOIS sintéticos diferentes que
+      // mediam o mesmo conceito (Cobertura DS no Overview, Uso de
+      // tokens % no mesmo Overview). Mantemos o objecto completo
+      // como `realAdoption` para a página Tokens poder mostrar
+      // breakdown por categoria.
+      if (real.adoption && typeof real.adoption.overall === 'number') {
+        merged.coverage    = real.adoption.overall;
+        merged.tokensUsage = real.adoption.overall;
+        merged.realAdoption = real.adoption;
+      }
       // fileName é gerido separadamente (vai para o badge no header)
       return merged;
     }
@@ -3643,7 +3656,7 @@
       // --- Página Tokens ---
       // Catálogo de tokens (cor, tipografia, spacing, radius) com
       // adopção sintética gerada por análise.
-      renderTokensPage();
+      renderTokensPage(data);
 
       // --- Página Foundations ---
       // KPIs dinâmicos: WCAG (% AA), tokens totais ligados. Os KPIs
@@ -4100,7 +4113,7 @@
     // Estado da página
     let tokensData = null;
 
-    function renderTokensPage() {
+    function renderTokensPage(data) {
       // Gera adopção sintética por categoria — uma vez por análise
       tokensData = {
         color:   withAdoption(TOKENS.color),
@@ -4132,7 +4145,11 @@
       $('#tokens-used').textContent       = used;
       $('#tokens-used-trend').textContent = `${Math.round(used / total * 100)}% do catálogo`;
       $('#tokens-unused').textContent     = unused;
-      $('#tokens-adoption').textContent   = avgAdoption + '%';
+      // Se temos adopção real da função, usa-a — caso contrário, média sintética
+      const realAdoption = (data && data.realAdoption && typeof data.realAdoption.overall === 'number')
+        ? data.realAdoption.overall
+        : avgAdoption;
+      $('#tokens-adoption').textContent   = realAdoption + '%';
     }
 
     // Tabs internos — switching entre categorias de tokens
