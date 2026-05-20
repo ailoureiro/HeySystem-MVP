@@ -1,0 +1,24 @@
+# =========================================================
+# CONFIGURAÇÃO DO NETLIFY
+# Este ficheiro vive na raiz do projecto e diz à Netlify
+# como construir e servir o site.
+# =========================================================
+
+[build]
+  # Como o nosso site é puro HTML/CSS/JS, não há "build step".
+  # Apontamos o publish directory para a raiz.
+  publish = "."
+
+  # Pasta onde a Netlify procura serverless functions.
+  functions = "netlify/functions"
+
+# =========================================================
+# REDIRECTS / REWRITES (opcional)
+# Útil se quiseres URLs mais limpos. Não precisas para já.
+# =========================================================
+
+# Exemplo: chamar /api/analyze em vez de /.netlify/functions/analyze
+# [[redirects]]
+#   from = "/api/analyze"
+#   to = "/.netlify/functions/analyze"
+#   status = 200
