@@ -394,87 +394,181 @@ function detectDetached(figmaFile) {
 /* =========================================================
    TOKEN ADOPTION — % de elementos que usam tokens vs hardcoded
    ---------------------------------------------------------
-   Para cada nó com fill/stroke/effect, decide se está a usar
-   um style do design system (= token) ou um valor hardcoded.
+   "Token" aqui significa QUALQUER uma destas duas coisas:
 
-   A análise faz-se em 3 categorias separadas:
-     - fill:   cores de preenchimento (cards, backgrounds, etc.)
-     - stroke: cores de borda (inputs, dividers, etc.)
-     - text:   cores de texto (separado por convenção, embora
-               internamente também sejam fills)
-     - effect: sombras, blurs (effects do nó)
+     A) Style legado (figmaFile.styles) — aplicado via
+        node.styles.{fill|stroke|effect|fills}
+     B) Variable moderno (lançado em 2024) — aplicado via
+        node.boundVariables.* OU
+        node.fills[i].boundVariables.color
+        node.strokes[i].boundVariables.color
+        node.effects[i].boundVariables.color
 
-   Para evitar duplo-counting, NÃO contamos nós dentro de
-   INSTANCE (essas herdam do master) nem dentro de páginas de
-   documentação (que tipicamente usam hardcoded de propósito).
+   Variables podem cobrir muito mais que Styles: cor, spacing,
+   radius, tamanho de fonte, etc. Por isso medimos várias
+   categorias separadas.
+
+   Categorias:
+     - fill:    cores de preenchimento
+     - stroke:  cores de borda
+     - text:    cor + tamanho de fonte dos nós TEXT
+     - effect:  sombras, blurs
+     - radius:  cornerRadius dos frames/rectângulos
+     - spacing: padding + itemSpacing dos frames com auto-layout
+
+   Exclusões (para evitar duplo-counting / falsos positivos):
+     - Nós dentro de INSTANCE (herdam do master)
+     - Páginas de documentação
    ========================================================= */
 function detectTokenAdoption(figmaFile, isDocPageFn) {
-  // Contadores por categoria
   const stats = {
-    fill:   { withToken: 0, total: 0 },
-    stroke: { withToken: 0, total: 0 },
-    text:   { withToken: 0, total: 0 },
-    effect: { withToken: 0, total: 0 }
+    fill:    { withToken: 0, total: 0 },
+    stroke:  { withToken: 0, total: 0 },
+    text:    { withToken: 0, total: 0 },
+    effect:  { withToken: 0, total: 0 },
+    radius:  { withToken: 0, total: 0 },
+    spacing: { withToken: 0, total: 0 }
   };
 
-  // Verifica se um array de fills tem pelo menos um fill visível e sólido.
-  // (Ignora cores transparentes, fills hidden, gradientes, imagens.)
-  function hasVisibleSolidFill(fills) {
-    if (!Array.isArray(fills) || fills.length === 0) return false;
-    return fills.some(f => {
-      if (f.visible === false) return false;
-      if (f.type !== 'SOLID') return false;
-      // Cor invisível (alpha 0) não conta
-      if (f.opacity === 0) return false;
-      if (f.color && f.color.a === 0) return false;
-      return true;
-    });
+  // ----- Helpers de detecção -----
+
+  // Verifica se um fill/stroke individual tem Variable ligada
+  function paintHasVariable(paint) {
+    return !!(paint && paint.boundVariables && paint.boundVariables.color);
   }
 
-  function hasVisibleEffect(effects) {
-    if (!Array.isArray(effects) || effects.length === 0) return false;
-    return effects.some(e => e.visible !== false);
+  // Verifica se um effect tem Variable ligada (ex: cor da sombra)
+  function effectHasVariable(effect) {
+    return !!(effect && effect.boundVariables && (effect.boundVariables.color || effect.boundVariables.radius));
   }
 
+  // Fills visíveis e sólidos (ignora transparentes, hidden, gradientes, imagens)
+  function isVisibleSolidPaint(paint) {
+    if (!paint || paint.visible === false) return false;
+    if (paint.type !== 'SOLID') return false;
+    if (paint.opacity === 0) return false;
+    if (paint.color && paint.color.a === 0) return false;
+    return true;
+  }
+
+  function isVisibleEffect(effect) {
+    return effect && effect.visible !== false;
+  }
+
+  // ----- Lógica por categoria -----
+
+  // FILL: itera os fills do nó. Conta cada fill visível & sólido como
+  // uma "decisão". Tem token se EITHER node.styles.fill EITHER
+  // o próprio fill tem boundVariables.color.
+  function processFills(node, category) {
+    if (!Array.isArray(node.fills)) return;
+
+    const nodeHasFillStyle = !!(node.styles && (node.styles.fill || node.styles.fills));
+
+    for (const fill of node.fills) {
+      if (!isVisibleSolidPaint(fill)) continue;
+      stats[category].total++;
+      // Tem token se: aplicou Style globalmente OU se este fill tem Variable
+      if (nodeHasFillStyle || paintHasVariable(fill)) {
+        stats[category].withToken++;
+      }
+    }
+  }
+
+  function processStrokes(node) {
+    if (!Array.isArray(node.strokes)) return;
+    const nodeHasStrokeStyle = !!(node.styles && (node.styles.stroke || node.styles.strokes));
+
+    for (const stroke of node.strokes) {
+      if (!isVisibleSolidPaint(stroke)) continue;
+      stats.stroke.total++;
+      if (nodeHasStrokeStyle || paintHasVariable(stroke)) {
+        stats.stroke.withToken++;
+      }
+    }
+  }
+
+  function processEffects(node) {
+    if (!Array.isArray(node.effects)) return;
+    const nodeHasEffectStyle = !!(node.styles && (node.styles.effect || node.styles.effects));
+
+    for (const effect of node.effects) {
+      if (!isVisibleEffect(effect)) continue;
+      stats.effect.total++;
+      if (nodeHasEffectStyle || effectHasVariable(effect)) {
+        stats.effect.withToken++;
+      }
+    }
+  }
+
+  // TEXT: extra para nós TEXT — verificar também variables ligados a tamanho
+  function processText(node) {
+    if (node.type !== 'TEXT') return;
+    // Tamanho de fonte (uma decisão de design separada)
+    if (node.style && typeof node.style.fontSize === 'number') {
+      stats.text.total++;
+      const hasTextStyle = !!(node.styles && (node.styles.text || node.styles.fontSize));
+      const hasFontSizeVar = !!(node.boundVariables && node.boundVariables.fontSize);
+      if (hasTextStyle || hasFontSizeVar) {
+        stats.text.withToken++;
+      }
+    }
+  }
+
+  // RADIUS: nós com cornerRadius definido (>0) qualificam-se
+  function processRadius(node) {
+    // Frames e rectangles com radius definido
+    if (typeof node.cornerRadius === 'number' && node.cornerRadius > 0) {
+      stats.radius.total++;
+      const hasRadiusVar = !!(node.boundVariables && node.boundVariables.cornerRadius);
+      if (hasRadiusVar) stats.radius.withToken++;
+    }
+    // rectangleCornerRadii (cada canto separado) — conta como 4 decisões
+    if (Array.isArray(node.rectangleCornerRadii)) {
+      for (let i = 0; i < node.rectangleCornerRadii.length; i++) {
+        if (node.rectangleCornerRadii[i] > 0) {
+          stats.radius.total++;
+          const cornerKeys = ['topLeftRadius', 'topRightRadius', 'bottomLeftRadius', 'bottomRightRadius'];
+          const hasCornerVar = !!(node.boundVariables && node.boundVariables[cornerKeys[i]]);
+          if (hasCornerVar) stats.radius.withToken++;
+        }
+      }
+    }
+  }
+
+  // SPACING: padding + itemSpacing dos frames com auto-layout
+  function processSpacing(node) {
+    // Auto-layout só está activo em frames com layoutMode definido
+    if (!node.layoutMode || node.layoutMode === 'NONE') return;
+
+    const spacingProps = [
+      'paddingLeft', 'paddingRight', 'paddingTop', 'paddingBottom',
+      'itemSpacing', 'counterAxisSpacing'
+    ];
+    for (const prop of spacingProps) {
+      if (typeof node[prop] === 'number' && node[prop] > 0) {
+        stats.spacing.total++;
+        const hasVar = !!(node.boundVariables && node.boundVariables[prop]);
+        if (hasVar) stats.spacing.withToken++;
+      }
+    }
+  }
+
+  // ----- Travessia da árvore -----
   function visit(node, insideInstance, isDocPage) {
     if (!node) return;
 
-    // Páginas de documentação não contam (mesmo critério do detached).
-    // Instâncias herdam decisões do master — contar seria duplo.
     const shouldCount = !insideInstance && !isDocPage;
 
     if (shouldCount) {
-      // ----- FILL -----
-      if (hasVisibleSolidFill(node.fills)) {
-        // Texto e outros tipos contam em categorias diferentes
-        const category = node.type === 'TEXT' ? 'text' : 'fill';
-        stats[category].total++;
-        // node.styles.fill aponta para um style ID se há token aplicado
-        if (node.styles && node.styles.fill) {
-          stats[category].withToken++;
-        } else if (node.type === 'TEXT' && node.styles && node.styles.fills) {
-          // Algumas versões da API usam 'fills' (plural) para text
-          stats[category].withToken++;
-        }
-      }
-
-      // ----- STROKE -----
-      if (hasVisibleSolidFill(node.strokes)) {
-        stats.stroke.total++;
-        if (node.styles && node.styles.stroke) {
-          stats.stroke.withToken++;
-        } else if (node.styles && node.styles.strokes) {
-          stats.stroke.withToken++;
-        }
-      }
-
-      // ----- EFFECT (sombras, blurs) -----
-      if (hasVisibleEffect(node.effects)) {
-        stats.effect.total++;
-        if (node.styles && (node.styles.effect || node.styles.effects)) {
-          stats.effect.withToken++;
-        }
-      }
+      // Para FILLS: separa text de não-text por convenção
+      const fillCategory = node.type === 'TEXT' ? 'text' : 'fill';
+      processFills(node, fillCategory);
+      processStrokes(node);
+      processEffects(node);
+      processText(node);
+      processRadius(node);
+      processSpacing(node);
     }
 
     // Recursão
@@ -492,35 +586,42 @@ function detectTokenAdoption(figmaFile, isDocPageFn) {
 
   visit(figmaFile.document, false, false);
 
-  // Calcula percentagens
-  const percentage = (s) => s.total === 0 ? 0 : Math.round((s.withToken / s.total) * 100);
+  // Percentagens
+  const pct = (s) => s.total === 0 ? null : Math.round((s.withToken / s.total) * 100);
 
   const byCategory = {
-    fill:   percentage(stats.fill),
-    stroke: percentage(stats.stroke),
-    text:   percentage(stats.text),
-    effect: percentage(stats.effect)
+    fill:    pct(stats.fill),
+    stroke:  pct(stats.stroke),
+    text:    pct(stats.text),
+    effect:  pct(stats.effect),
+    radius:  pct(stats.radius),
+    spacing: pct(stats.spacing)
   };
 
-  // Overall = média ponderada pelo nº de decisões em cada categoria
-  // (mais justo que média simples — uma categoria com poucos casos
-  // não distorce o número)
-  const totalDecisions = stats.fill.total + stats.stroke.total + stats.text.total + stats.effect.total;
-  const totalWithToken = stats.fill.withToken + stats.stroke.withToken + stats.text.withToken + stats.effect.withToken;
+  // Overall: média ponderada por nº de decisões em cada categoria
+  let totalDecisions = 0, totalWithToken = 0;
+  for (const cat in stats) {
+    totalDecisions += stats[cat].total;
+    totalWithToken += stats[cat].withToken;
+  }
   const overall = totalDecisions === 0 ? 0 : Math.round((totalWithToken / totalDecisions) * 100);
 
   return {
     overall,
     byCategory,
     totals: {
-      fillsWithToken:   stats.fill.withToken,
-      fillsTotal:       stats.fill.total,
-      strokesWithToken: stats.stroke.withToken,
-      strokesTotal:     stats.stroke.total,
-      textsWithToken:   stats.text.withToken,
-      textsTotal:       stats.text.total,
-      effectsWithToken: stats.effect.withToken,
-      effectsTotal:     stats.effect.total
+      fillsWithToken:    stats.fill.withToken,
+      fillsTotal:        stats.fill.total,
+      strokesWithToken:  stats.stroke.withToken,
+      strokesTotal:      stats.stroke.total,
+      textsWithToken:    stats.text.withToken,
+      textsTotal:        stats.text.total,
+      effectsWithToken:  stats.effect.withToken,
+      effectsTotal:      stats.effect.total,
+      radiusWithToken:   stats.radius.withToken,
+      radiusTotal:       stats.radius.total,
+      spacingWithToken:  stats.spacing.withToken,
+      spacingTotal:      stats.spacing.total
     }
   };
 }
