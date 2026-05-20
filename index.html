@@ -3487,11 +3487,14 @@
     }
 
     function getStatusFromScore(score) {
-      if (score <= 40)  return { label: 'Sistema crítico',     tone: 'critical',
+      /* Thresholds revistos para reflectir realidade de sistemas em produção.
+         A maioria dos design systems saudáveis vive entre 60-80; só sistemas
+         realmente problemáticos descem abaixo de 40. */
+      if (score < 40)   return { label: 'Sistema crítico',     tone: 'critical',
         description: 'O sistema mostra sinais sérios de drift e fragmentação. Recomendamos uma intervenção imediata.' };
-      if (score <= 70)  return { label: 'Sistema instável',    tone: 'warning',
+      if (score < 60)   return { label: 'Sistema instável',    tone: 'warning',
         description: 'Há inconsistências relevantes a corrigir. Prioriza a redução de detached e overrides excessivos.' };
-      if (score <= 85)  return { label: 'Sistema saudável',    tone: 'good',
+      if (score < 80)   return { label: 'Sistema saudável',    tone: 'good',
         description: 'O teu Design System está em boa forma, mas há áreas onde podes apertar a consistência.' };
       return { label: 'Sistema muito bom', tone: 'excellent',
         description: 'Excelente coerência geral. Mantém o ritmo de governance e revisões periódicas.' };
@@ -3500,21 +3503,25 @@
     /* =========================================================
        HEALTH SCORE REAL — calculado a partir de sinais reais
        ---------------------------------------------------------
-       Fórmula:
-         score = 100 × (adoption/100)
-                 − penaltyDetached
-                 − penaltyUnused
-                 − penaltyDuplicates
+       Fórmula (revista):
+         score = 60 (base mínima decente)
+                 + (adoption × 0.4)    ← bónus até +40 por boa adopção
+                 − penaltyDetached     ← até -25
+                 − penaltyUnused       ← até -15
+                 − penaltyDuplicates   ← até -15
 
-       Adopção como factor multiplicativo: sistema com 0% de uso de
-       tokens não pode ser "saudável" mesmo sem outros problemas.
+       Mudança vs versão anterior: adopção deixou de ser factor
+       multiplicativo (que punia demais sistemas em transição).
+       Agora é bónus aditivo a uma base de 60. Um sistema com
+       adopção 0% e sem outros problemas marca 60 (não 10), o
+       que é mais alinhado com a realidade de Design Systems
+       em produção — a maioria vive na zona 60-90.
 
-       Penalizações com saturação (min/max): primeira dezena de cada
-       problema é o que mais dói; a partir daí o impacto satura, para
-       evitar scores negativos.
+       Penalizações com saturação (min/max): primeira dezena de
+       cada problema é o que mais dói; daí em diante, satura.
 
-       Resultado categorizado em múltiplos de 10 (90, 80, 70, ...) para
-       comunicar magnitude sem precisão falsa.
+       Resultado categorizado em múltiplos de 10 para evitar
+       precisão falsa.
        ========================================================= */
     function computeHealthScore(data) {
       // Verifica se temos pelo menos algum sinal real
@@ -3525,12 +3532,13 @@
       // Se não há dados reais, fallback ao score sintético existente
       if (!hasReal) return data.score;
 
-      // 1. Base: adopção como factor multiplicativo (0-100)
-      // Se não temos adopção, assumimos 100 (não penalizar a base sem dados)
+      // 1. Base 60 + bónus de adopção (até +40)
+      // Se não temos dados de adopção, assumimos 80 (penalização leve)
+      // — não é justo penalizar sem informação, mas também não inflacionar
       const adoption = (data.realAdoption && typeof data.realAdoption.overall === 'number')
         ? data.realAdoption.overall
-        : 100;
-      let score = 100 * (adoption / 100);
+        : 80;
+      let score = 60 + (adoption * 0.4);
 
       // 2. Penalizações (saturadas)
       const detached    = data.detached || 0;
@@ -3546,11 +3554,9 @@
       score = score - penaltyDetached - penaltyUnused - penaltyDuplicates;
 
       // 3. Garantir limites razoáveis [10, 100]
-      // Mínimo 10 evita 0 (que faria animação esquisita do anel)
       score = Math.max(10, Math.min(100, score));
 
       // 4. Categorizar em múltiplos de 10
-      // Arredondamos para o múltiplo de 10 mais próximo (round-half-up)
       score = Math.round(score / 10) * 10;
 
       return score;
