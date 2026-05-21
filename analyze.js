@@ -167,15 +167,17 @@ function transformFigmaData(figmaFile) {
   // ----- Método 2: Travessia da árvore -----
   // Percorremos as páginas e contamos nós COMPONENT/COMPONENT_SET reais.
   // Isto reflete melhor o que o user vê no painel Assets.
-  // ----- ETAPA 2 (OPTIMIZADO): travessia única -----
-  // Em vez de 4 travessias separadas (walkDocument, detectDetached,
-  // detectTokenAdoption, detectComponentUsage), fazemos UMA SÓ travessia
-  // que acumula todos os dados necessários. Para ficheiros grandes
-  // (26k+ nós) esta redução de 4x→1x é a diferença entre exceder o
-  // timeout do Netlify (10s) e completar em ~3s.
-  //
-  // As funções `detect*` ficam preservadas no ficheiro para referência
-  // e como fallback, mas não são chamadas neste hot path.
+  const treeStats = walkDocument(figmaFile.document);
+
+  // ----- ETAPA 2: Detecção de componentes detached -----
+  // Combina 2 sinais (ver detectDetached) para identificar instâncias
+  // que perderam ligação ao componente master.
+  const detachedAnalysis = detectDetached(figmaFile);
+
+  // ----- ETAPA 2: Adopção de tokens -----
+  // % de elementos visuais (fills/strokes/effects/text) que usam
+  // styles do design system vs valores hardcoded.
+  // Reaproveita o detector de páginas de documentação.
   const componentNames = new Set();
   for (const id in (figmaFile.components || {})) {
     const name = figmaFile.components[id].name;
@@ -186,17 +188,17 @@ function transformFigmaData(figmaFile) {
     if (name) componentNames.add(name);
   }
   const isDocPageFn = makeIsDocumentationPage(componentNames);
+  const adoptionAnalysis = detectTokenAdoption(figmaFile, isDocPageFn);
 
-  const singlePass = analyzeFigmaTreeSinglePass(figmaFile, isDocPageFn);
+  // ----- ETAPA 2: Uso de componentes (3 análises numa só) -----
+  // Top usados, não usados, e duplicados potenciais.
+  const usageAnalysis = detectComponentUsage(figmaFile);
 
-  // Os resultados ficam organizados como antes — alias para minimizar
-  // mudanças no resto da função.
-  const treeStats         = singlePass.treeStats;
-  const detachedAnalysis  = singlePass.detached;
-  const adoptionAnalysis  = singlePass.adoption;
-  const usageAnalysis     = singlePass.usage;
-
-  // Inconsistências visuais continuam desactivadas (custo O(N²)).
+  // ----- ETAPA 2: Inconsistências visuais (DESACTIVADO) -----
+  // O detector de cores faz O(N²) comparações e fica muito lento em
+  // ficheiros grandes. Os dados não eram críticos no dashboard, por
+  // isso preferimos desligar até optimizarmos. Função preservada no
+  // ficheiro mas não chamada.
   const visualAnalysis = {
     colors:    { count: 0, totalOccurrences: 0, examples: [] },
     fontSizes: { count: 0, totalOccurrences: 0, examples: [] },

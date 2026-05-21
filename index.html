@@ -2426,12 +2426,16 @@
             Overview
           </div>
           <div class="nav__item">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+            Foundations
+          </div>
+          <div class="nav__item">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3v9l6 3"/></svg>
             Componentes
           </div>
           <div class="nav__item">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
-            Foundations
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51"/></svg>
+            Tokens
           </div>
           <div class="nav__item">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
@@ -2665,6 +2669,220 @@
 
         </div><!-- /.page#page-overview -->
 
+        <!-- ====== Página: Foundations ====== -->
+        <div class="page" id="page-foundations">
+
+          <!-- 4 KPI cards -->
+          <div class="metrics">
+            <div class="metric metric--mint">
+              <p class="metric__label">Foundations definidas</p>
+              <p class="metric__value">6 / 6</p>
+              <span class="metric__trend metric__trend--up">Sistema completo</span>
+            </div>
+            <div class="metric metric--peach">
+              <p class="metric__label">Princípios aplicados</p>
+              <p class="metric__value">4</p>
+              <span class="metric__trend metric__trend--up">Documentados</span>
+            </div>
+            <div class="metric metric--sky">
+              <p class="metric__label">Acessibilidade</p>
+              <p class="metric__value" id="foundations-wcag">—</p>
+              <span class="metric__trend metric__trend--up">WCAG AA</span>
+            </div>
+            <div class="metric metric--lavender">
+              <p class="metric__label">Tokens ligados</p>
+              <p class="metric__value" id="foundations-tokens">—</p>
+              <span class="metric__trend metric__trend--up">Catalogados</span>
+            </div>
+          </div>
+
+          <!-- ====== Secção: Pilares ====== -->
+          <div class="section">
+            <div class="section__header">
+              <div>
+                <h2 class="section__title">Pilares do sistema</h2>
+                <p class="section__subtitle">As bases visuais sobre as quais todos os componentes assentam.</p>
+              </div>
+            </div>
+
+            <div class="foundations-grid">
+              <!-- Pilar: Cor -->
+              <div class="foundation-card" data-foundation="color">
+                <div class="foundation-card__preview">
+                  <div class="foundation-preview-colors">
+                    <span style="background: #1652F0"></span>
+                    <span style="background: #7C3AED"></span>
+                    <span style="background: #16A34A"></span>
+                    <span style="background: #D97706"></span>
+                    <span style="background: #DC2626"></span>
+                    <span style="background: #0F1115"></span>
+                  </div>
+                </div>
+                <div class="foundation-card__body">
+                  <h3 class="foundation-card__title">Cor</h3>
+                  <p class="foundation-card__description">Paleta primária e neutros, com semântica de estado.</p>
+                  <div class="foundation-card__meta">
+                    <span class="foundation-card__count">21 tokens</span>
+                    <span class="foundation-card__cta">
+                      Ver tokens
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Pilar: Tipografia -->
+              <div class="foundation-card" data-foundation="type">
+                <div class="foundation-card__preview">
+                  <div class="foundation-preview-type">
+                    <div class="foundation-preview-type__aa">Aa</div>
+                    <div class="foundation-preview-type__sample">Inter · 12–56px</div>
+                  </div>
+                </div>
+                <div class="foundation-card__body">
+                  <h3 class="foundation-card__title">Tipografia</h3>
+                  <p class="foundation-card__description">Escala tipográfica baseada em Inter, do corpo ao display.</p>
+                  <div class="foundation-card__meta">
+                    <span class="foundation-card__count">9 tokens</span>
+                    <span class="foundation-card__cta">
+                      Ver tokens
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Pilar: Spacing -->
+              <div class="foundation-card" data-foundation="spacing">
+                <div class="foundation-card__preview">
+                  <div class="foundation-preview-spacing">
+                    <span style="width: 10%"></span>
+                    <span style="width: 25%"></span>
+                    <span style="width: 40%"></span>
+                    <span style="width: 60%"></span>
+                    <span style="width: 100%"></span>
+                  </div>
+                </div>
+                <div class="foundation-card__body">
+                  <h3 class="foundation-card__title">Spacing</h3>
+                  <p class="foundation-card__description">Escala de 4px que governa padding, gap e margens.</p>
+                  <div class="foundation-card__meta">
+                    <span class="foundation-card__count">10 tokens</span>
+                    <span class="foundation-card__cta">
+                      Ver tokens
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Pilar: Radius -->
+              <div class="foundation-card" data-foundation="radius">
+                <div class="foundation-card__preview">
+                  <div class="foundation-preview-radius">
+                    <span style="border-radius: 4px"></span>
+                    <span style="border-radius: 8px"></span>
+                    <span style="border-radius: 12px"></span>
+                    <span style="border-radius: 50%"></span>
+                  </div>
+                </div>
+                <div class="foundation-card__body">
+                  <h3 class="foundation-card__title">Radius</h3>
+                  <p class="foundation-card__description">Curvatura consistente entre superfícies e controlos.</p>
+                  <div class="foundation-card__meta">
+                    <span class="foundation-card__count">5 tokens</span>
+                    <span class="foundation-card__cta">
+                      Ver tokens
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Pilar: Iconografia -->
+              <div class="foundation-card" data-foundation="icons">
+                <div class="foundation-card__preview">
+                  <div class="foundation-preview-icons">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/></svg>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06"/></svg>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                  </div>
+                </div>
+                <div class="foundation-card__body">
+                  <h3 class="foundation-card__title">Iconografia</h3>
+                  <p class="foundation-card__description">Sistema de ícones outline, 24px, stroke 2px.</p>
+                  <div class="foundation-card__meta">
+                    <span class="foundation-card__count">48 ícones</span>
+                    <span class="foundation-card__cta">
+                      Em breve
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Pilar: Grid System -->
+              <div class="foundation-card" data-foundation="grid">
+                <div class="foundation-card__preview">
+                  <div class="foundation-preview-grid">
+                    <span></span><span></span><span></span><span></span>
+                    <span></span><span></span><span></span><span></span>
+                    <span></span><span></span><span></span><span></span>
+                  </div>
+                </div>
+                <div class="foundation-card__body">
+                  <h3 class="foundation-card__title">Grid &amp; Layout</h3>
+                  <p class="foundation-card__description">Sistema de 12 colunas responsivo para layouts consistentes.</p>
+                  <div class="foundation-card__meta">
+                    <span class="foundation-card__count">12 colunas</span>
+                    <span class="foundation-card__cta">
+                      Em breve
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ====== Secção: Princípios ====== -->
+          <div class="section">
+            <div class="section__header">
+              <div>
+                <h2 class="section__title">Princípios do sistema</h2>
+                <p class="section__subtitle">As regras conceptuais que orientam todas as decisões de design.</p>
+              </div>
+            </div>
+
+            <div class="principles-list">
+              <div class="principle">
+                <div class="principle__number">1</div>
+                <h3 class="principle__title">Clareza acima de tudo</h3>
+                <p class="principle__description">Cada elemento existe por uma razão. Removemos ruído antes de adicionar enfeite.</p>
+              </div>
+              <div class="principle">
+                <div class="principle__number">2</div>
+                <h3 class="principle__title">Consistência por defeito</h3>
+                <p class="principle__description">Os mesmos problemas resolvem-se com as mesmas soluções, em todo o sistema.</p>
+              </div>
+              <div class="principle">
+                <div class="principle__number">3</div>
+                <h3 class="principle__title">Acessível desde a raiz</h3>
+                <p class="principle__description">Contraste, foco, navegação por teclado e leitores de ecrã são requisitos, não extras.</p>
+              </div>
+              <div class="principle">
+                <div class="principle__number">4</div>
+                <h3 class="principle__title">Composição sobre repetição</h3>
+                <p class="principle__description">Componentes pequenos e reutilizáveis batem componentes grandes e específicos.</p>
+              </div>
+            </div>
+          </div>
+
+        </div><!-- /.page#page-foundations -->
+
         <!-- ====== Página: Componentes ====== -->
         <div class="page" id="page-components">
 
@@ -2778,8 +2996,7 @@
         </div><!-- /.page#page-components -->
 
         <!-- ====== Página: Tokens ====== -->
-        <!-- ====== Página: Foundations (antes Tokens) ====== -->
-        <div class="page" id="page-foundations">
+        <div class="page" id="page-tokens">
 
           <!-- 4 KPI cards no topo (mesma .metric reutilizada das outras páginas) -->
           <div class="metrics">
@@ -2850,7 +3067,7 @@
             </div>
           </div>
 
-        </div><!-- /.page#page-foundations -->
+        </div><!-- /.page#page-tokens -->
 
       </main>
     </div>
@@ -4028,8 +4245,9 @@
        ========================================================= */
     const PAGES = {
       'page-overview':    { nav: 'Overview' },
+      'page-foundations': { nav: 'Foundations' },
       'page-components':  { nav: 'Componentes' },
-      'page-foundations': { nav: 'Foundations' }  // antes "Tokens" — renomeado
+      'page-tokens':      { nav: 'Tokens' }
     };
 
     function activatePage(pageId) {
@@ -4594,22 +4812,22 @@
       if (tab) tab.click();
     }
 
-    /* Foundation cards → navegação contextual para tabs da Foundations.
-       (Função preservada — não há cards no DOM neste momento, mas o
-       binding fica pronto caso reapareçam.) */
+    /* Foundation cards → navegação contextual para Tokens.
+       Cards com data-foundation que mapeia para uma categoria de
+       tokens abrem a página Tokens com o tab certo já activo. */
     function initFoundationCards() {
       const mapping = {
         color:   'color',
         type:    'type',
         spacing: 'spacing',
         radius:  'radius'
-        // 'icons' e 'grid' não têm tab ainda → não navegam
+        // 'icons' e 'grid' não têm página de tokens ainda → não navegam
       };
       document.querySelectorAll('[data-foundation]').forEach(card => {
         const tokenTab = mapping[card.dataset.foundation];
-        if (!tokenTab) return;
+        if (!tokenTab) return; // cards "Em breve" não fazem nada
         card.addEventListener('click', () => {
-          activatePage('page-foundations');
+          activatePage('page-tokens');
           activateTokenTab(tokenTab);
         });
       });
