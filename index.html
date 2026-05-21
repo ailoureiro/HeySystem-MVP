@@ -2292,19 +2292,10 @@
           </p>
 
           <form id="analyze-form" novalidate>
-            <div class="field">
-              <label class="field__label" for="analysis-name">
-                Nome da análise <span class="field__label-hint">(opcional)</span>
-              </label>
-              <input
-                id="analysis-name"
-                class="field__input"
-                type="text"
-                placeholder="Ex: Auditoria de Q2"
-                autocomplete="off"
-                maxlength="60"
-              />
-            </div>
+            <!-- "Nome da análise" removido — o título do dashboard
+                 passa a ser auto-preenchido com o nome real do
+                 ficheiro Figma (vem do campo `fileName` da API).
+                 O título continua editável no dashboard. -->
 
             <div class="field">
               <label class="field__label" for="figma-url">Link do ficheiro Figma</label>
@@ -3102,19 +3093,8 @@
       </div>
 
       <form id="modal-analyze-form" novalidate>
-        <div class="field">
-          <label class="field__label" for="modal-analysis-name">
-            Nome da análise <span class="field__label-hint">(opcional)</span>
-          </label>
-          <input
-            id="modal-analysis-name"
-            class="field__input"
-            type="text"
-            placeholder="Ex: Auditoria de Q2"
-            autocomplete="off"
-            maxlength="60"
-          />
-        </div>
+        <!-- "Nome da análise" removido (mesma razão da landing).
+             O nome vem do ficheiro Figma e é editável no header. -->
 
         <div class="field">
           <label class="field__label" for="modal-figma-url">Link do ficheiro Figma</label>
@@ -3290,7 +3270,6 @@
 
     const form    = $('#analyze-form');
     const input   = $('#figma-url');
-    const nameInput = $('#analysis-name');
     const errorEl = $('#figma-error');
     const btn     = $('#analyze-btn');
 
@@ -3317,11 +3296,9 @@
       btn.classList.add('is-loading');
       btn.querySelector('.btn__label').textContent = 'A iniciar análise…';
 
-      // Captura nome opcional (pode ser string vazia → fallback no render)
-      const customName = nameInput.value.trim();
-
-      // Pequeno delay antes de mostrar o ecrã de loading (sensação de transição)
-      setTimeout(() => startLoading(input.value, customName), 400);
+      // Pequeno delay antes de mostrar o ecrã de loading (sensação de transição).
+      // customName é null — o título virá do fileName real do Figma (ou fallback).
+      setTimeout(() => startLoading(input.value, null), 400);
     });
 
     /* =========================================================
@@ -3455,6 +3432,13 @@
       // os componentes não usados, e identificar duplicados específicos.
       if (real.componentUsage) {
         merged.componentUsage = real.componentUsage;
+      }
+
+      // ETAPA 2 — Inconsistências visuais (cores quase-iguais, font sizes
+      // fora da escala, spacing arbitrário). Objecto inteiro disponível
+      // para tooltips e drill-down.
+      if (real.visualInconsistencies) {
+        merged.visualInconsistencies = real.visualInconsistencies;
       }
 
       // ETAPA 2 (easy wins) — números do hero badge
@@ -3791,6 +3775,44 @@
         });
       }
 
+      // ----- Insights sobre inconsistências visuais -----
+      const vi = data.visualInconsistencies;
+      if (vi) {
+        // Cores quase-iguais (eyedropper accidents)
+        if (vi.colors && vi.colors.count > 0) {
+          const occ = vi.colors.totalOccurrences;
+          const exemplo = vi.colors.examples && vi.colors.examples[0];
+          const detail = exemplo
+            ? `${vi.colors.count} cores muito próximas (ex: ${exemplo.hex} vs ${exemplo.similarTo}). ${occ} elementos a corrigir.`
+            : `${vi.colors.count} cores hardcoded próximas de tokens existentes.`;
+          insights.push({
+            tone: vi.colors.count >= 5 ? 'warning' : 'info',
+            title: 'Cores quase-iguais',
+            detail
+          });
+        }
+
+        // Font sizes fora da escala
+        if (vi.fontSizes && vi.fontSizes.count > 0) {
+          const occ = vi.fontSizes.totalOccurrences;
+          insights.push({
+            tone: 'info',
+            title: 'Font sizes fora da escala',
+            detail: `${vi.fontSizes.count} tamanhos de fonte usados fora da escala dominante (${occ} ocorrências).`
+          });
+        }
+
+        // Spacing arbitrário
+        if (vi.spacing && vi.spacing.count > 0) {
+          const occ = vi.spacing.totalOccurrences;
+          insights.push({
+            tone: vi.spacing.count >= 5 ? 'warning' : 'info',
+            title: 'Spacing arbitrário',
+            detail: `${vi.spacing.count} valores de spacing não-tokenizados (${occ} ocorrências). Considera múltiplos de 4 ou Variables.`
+          });
+        }
+      }
+
       // Garantir pelo menos 1 insight, no máximo 4
       const finalInsights = insights.slice(0, 4);
       if (!finalInsights.length) {
@@ -3961,11 +3983,19 @@
         data.priorities = realInsights.priorities;
       }
 
-      // --- Título editável: usa o nome do user, ou sugere um. ---
+      /* Título editável — ordem de prioridade:
+           1. customName  → quando o user já o definiu/editou (preserva escolha)
+           2. fileName    → nome REAL do ficheiro Figma vindo da função
+           3. fallback    → "Análise rápida — DD Mmm" gerado por suggestAnalysisName
+
+         O título permanece editável no dashboard (click-to-edit). Se o user
+         editar, a próxima análise do mesmo ficheiro respeita esse nome via
+         customName. */
       const titleEl = $('#analysis-title-text');
+      const realFileName = (realData && realData.fileName) ? realData.fileName.trim() : '';
       const analysisName = (customName && customName.length)
         ? customName
-        : suggestAnalysisName();
+        : (realFileName || suggestAnalysisName());
       titleEl.textContent = analysisName;
 
       // --- Meta no subtítulo ---
@@ -4014,26 +4044,41 @@
       // --- Metric cards ---
       $('#m-coverage').textContent        = data.coverage + '%';
 
-      /* Inconsistências = soma de 2 sinais REAIS de problemas:
+      /* Inconsistências = problemas estruturais + visuais (todos contagens reais).
+         Categorias:
            - detached:    instâncias soltas da library (alta severidade)
            - duplicates:  grupos potencialmente duplicados (média severidade)
+           - cores:       hex hardcoded "quase-iguais" (eyedropper accidents)
+           - font sizes:  tamanhos fora da escala dominante
+           - spacing:     valores arbitrários (não múltiplos de 4 nem tokens)
 
-         Decisão: "não usados" NÃO entra aqui — são candidatos a deprecação,
-         não inconsistências propriamente ditas. Continuam visíveis na
-         página Componentes (filtro "Nunca usados") e no Health Score.
-         "Adopção" também não entra (é uma percentagem, não uma contagem).
+         "Não usados" continua de fora (higiene da library, não inconsistência).
+         "Adopção" continua de fora (percentagem, não contagem).
 
-         Resultado: o número reflecte problemas reais que requerem acção. */
+         Cada parte é uma CONTAGEM DE OCORRÊNCIAS — não de "grupos". Isto significa
+         que 50 ocorrências da mesma cor errada contam 50 vezes (porque são 50
+         elementos a corrigir, não 1). */
+      const visualInc = data.visualInconsistencies || {};
+      const colorInc      = (visualInc.colors    || {}).totalOccurrences || 0;
+      const fontSizeInc   = (visualInc.fontSizes || {}).totalOccurrences || 0;
+      const spacingInc    = (visualInc.spacing   || {}).totalOccurrences || 0;
+
       const inconsistenciesReal =
             (data.detached   || 0)
-          + (data.duplicates || 0);
+          + (data.duplicates || 0)
+          + colorInc
+          + fontSizeInc
+          + spacingInc;
 
       $('#m-inconsistencies').textContent = inconsistenciesReal;
 
-      // Tooltip nativo via title — breakdown apenas das partes que contribuem
+      // Tooltip nativo via title — breakdown de TODAS as partes que contribuem
       const parts = [];
       if (data.detached   > 0) parts.push(`${data.detached} detached`);
       if (data.duplicates > 0) parts.push(`${data.duplicates} duplicados`);
+      if (colorInc        > 0) parts.push(`${colorInc} cores hardcoded`);
+      if (fontSizeInc     > 0) parts.push(`${fontSizeInc} font sizes fora da escala`);
+      if (spacingInc      > 0) parts.push(`${spacingInc} spacing arbitrário`);
 
       const tooltipText = parts.length
         ? parts.join(' · ')
@@ -4797,7 +4842,6 @@
       const openBtn    = document.querySelector('#new-analysis-btn');
       const form       = document.querySelector('#modal-analyze-form');
       const urlInput   = document.querySelector('#modal-figma-url');
-      const nameField  = document.querySelector('#modal-analysis-name');
       const errEl      = document.querySelector('#modal-figma-error');
       const submitBtn  = document.querySelector('#modal-analyze-btn');
       if (!modal || !openBtn) return;
@@ -4809,8 +4853,8 @@
         lastFocused = document.activeElement;
         modal.classList.add('is-open');
         modal.setAttribute('aria-hidden', 'false');
-        // Foco no primeiro input — boa prática a11y para abrir modais
-        setTimeout(() => nameField.focus(), 50);
+        // Foco no input do URL (único campo do form agora)
+        setTimeout(() => urlInput.focus(), 50);
       }
 
       function closeModal() {
@@ -4818,7 +4862,6 @@
         modal.setAttribute('aria-hidden', 'true');
         // Reset do form em cada fecho — modal abre sempre "limpo"
         urlInput.value = '';
-        nameField.value = '';
         urlInput.classList.remove('is-invalid');
         errEl.classList.remove('is-visible');
         // Restaurar foco no botão que abriu o modal (a11y)
@@ -4864,18 +4907,16 @@
         submitBtn.classList.add('is-loading');
         submitBtn.querySelector('.btn__label').textContent = 'A iniciar análise…';
 
-        const customName = nameField.value.trim();
         const url = urlInput.value;
 
-        // Fecha o modal e arranca o mesmo fluxo de loading
+        // Fecha o modal e arranca o mesmo fluxo de loading.
+        // customName é null — título virá do fileName real do Figma.
         setTimeout(() => {
           closeModal();
-          // Reset do botão para próxima vez
           submitBtn.disabled = false;
           submitBtn.classList.remove('is-loading');
           submitBtn.querySelector('.btn__label').textContent = 'Analisar Design System';
-          // Mesmo loading + dashboard render que vêm do form da landing
-          startLoading(url, customName);
+          startLoading(url, null);
         }, 400);
       });
     })();
