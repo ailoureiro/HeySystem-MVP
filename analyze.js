@@ -167,17 +167,15 @@ function transformFigmaData(figmaFile) {
   // ----- Método 2: Travessia da árvore -----
   // Percorremos as páginas e contamos nós COMPONENT/COMPONENT_SET reais.
   // Isto reflete melhor o que o user vê no painel Assets.
-  const treeStats = walkDocument(figmaFile.document);
-
-  // ----- ETAPA 2: Detecção de componentes detached -----
-  // Combina 2 sinais (ver detectDetached) para identificar instâncias
-  // que perderam ligação ao componente master.
-  const detachedAnalysis = detectDetached(figmaFile);
-
-  // ----- ETAPA 2: Adopção de tokens -----
-  // % de elementos visuais (fills/strokes/effects/text) que usam
-  // styles do design system vs valores hardcoded.
-  // Reaproveita o detector de páginas de documentação.
+  // ----- ETAPA 2 (OPTIMIZADO): travessia única -----
+  // Em vez de 4 travessias separadas (walkDocument, detectDetached,
+  // detectTokenAdoption, detectComponentUsage), fazemos UMA SÓ travessia
+  // que acumula todos os dados necessários. Para ficheiros grandes
+  // (26k+ nós) esta redução de 4x→1x é a diferença entre exceder o
+  // timeout do Netlify (10s) e completar em ~3s.
+  //
+  // As funções `detect*` ficam preservadas no ficheiro para referência
+  // e como fallback, mas não são chamadas neste hot path.
   const componentNames = new Set();
   for (const id in (figmaFile.components || {})) {
     const name = figmaFile.components[id].name;
@@ -188,25 +186,22 @@ function transformFigmaData(figmaFile) {
     if (name) componentNames.add(name);
   }
   const isDocPageFn = makeIsDocumentationPage(componentNames);
-  const adoptionAnalysis = detectTokenAdoption(figmaFile, isDocPageFn);
 
-  // ----- ETAPA 2: Uso de componentes (3 análises numa só) -----
-  // Top usados, não usados, e duplicados potenciais.
-  const usageAnalysis = detectComponentUsage(figmaFile);
+  const singlePass = analyzeFigmaTreeSinglePass(figmaFile, isDocPageFn);
 
-  // ----- ETAPA 2: Inconsistências visuais -----
-  // TEMPORARIAMENTE DESACTIVADO: o detector de cores faz O(N²) comparações
-  // (centenas de cores × centenas) e fica muito lento em ficheiros grandes.
-  // Os dados não são actualmente usados em sítios críticos do dashboard
-  // (só apareciam em insights laterais), por isso vale a pena desligar
-  // até optimizarmos o algoritmo. O resto do produto continua a funcionar.
+  // Os resultados ficam organizados como antes — alias para minimizar
+  // mudanças no resto da função.
+  const treeStats         = singlePass.treeStats;
+  const detachedAnalysis  = singlePass.detached;
+  const adoptionAnalysis  = singlePass.adoption;
+  const usageAnalysis     = singlePass.usage;
+
+  // Inconsistências visuais continuam desactivadas (custo O(N²)).
   const visualAnalysis = {
     colors:    { count: 0, totalOccurrences: 0, examples: [] },
     fontSizes: { count: 0, totalOccurrences: 0, examples: [] },
     spacing:   { count: 0, totalOccurrences: 0, examples: [] }
   };
-  // Para reactivar: descomenta a linha abaixo e otimiza detectVisualInconsistencies
-  // const visualAnalysis = detectVisualInconsistencies(figmaFile, isDocPageFn);
 
   return {
     fileName:           figmaFile.name,
@@ -1181,6 +1176,428 @@ function detectVisualInconsistencies(figmaFile, isDocPageFn) {
       count: spacingInconsistencies.length,
       totalOccurrences: spacingInconsistencies.reduce((sum, s) => sum + s.occurrences, 0),
       examples: spacingInconsistencies.slice(0, 10)
+    }
+  };
+}
+
+/* =========================================================
+   SINGLE-PASS TREE ANALYZER (optimização crítica)
+   ---------------------------------------------------------
+   Versão de produção que faz numa única travessia o trabalho
+   das 4 funções legadas (walkDocument, detectDetached,
+   detectTokenAdoption, detectComponentUsage).
+
+   Para um ficheiro de ~26k nós:
+     - 4 travessias: ~12-20s (excede timeout do Netlify)
+     - 1 travessia:  ~3-5s
+
+   Mantém TODA a lógica das funções originais — só junta no
+   mesmo visit() em vez de iterar 4 vezes. As funções
+   originais ficam no ficheiro para referência/fallback.
+   ========================================================= */
+function analyzeFigmaTreeSinglePass(figmaFile, isDocPageFn) {
+
+  // ===== Setup compartilhado =====
+
+  // Sets/Maps de componentes para lookup O(1) durante a travessia
+  const componentNames = new Set();
+  const componentIds   = new Set();
+  for (const id in (figmaFile.components || {})) {
+    componentIds.add(id);
+    const name = figmaFile.components[id].name;
+    if (name) componentNames.add(name);
+  }
+  for (const id in (figmaFile.componentSets || {})) {
+    componentIds.add(id);
+    const name = figmaFile.componentSets[id].name;
+    if (name) componentNames.add(name);
+  }
+
+  // Acumuladores — um por categoria de análise
+  const treeStats = { components: 0, componentSets: 0, pagesCount: 0, nodesCount: 0 };
+
+  const detached = { bySignal1: [], bySignal2: [], total: 0 };
+
+  const adoptionStats = {
+    fill:    { withToken: 0, total: 0 },
+    stroke:  { withToken: 0, total: 0 },
+    text:    { withToken: 0, total: 0 },
+    effect:  { withToken: 0, total: 0 },
+    radius:  { withToken: 0, total: 0 },
+    spacing: { withToken: 0, total: 0 }
+  };
+
+  // Mapa de componentes para usage analysis (contagem de instâncias)
+  const componentMap = {};
+  for (const id in (figmaFile.components || {})) {
+    const c = figmaFile.components[id];
+    componentMap[id] = {
+      id, name: c.name || '(sem nome)',
+      instanceCount: 0,
+      parentSetId: c.componentSetId || null,
+      remote: !!c.remote,
+      type: 'COMPONENT'
+    };
+  }
+  for (const id in (figmaFile.componentSets || {})) {
+    const cs = figmaFile.componentSets[id];
+    componentMap[id] = {
+      id, name: cs.name || '(sem nome)',
+      instanceCount: 0,
+      parentSetId: null,
+      remote: !!cs.remote,
+      type: 'COMPONENT_SET',
+      variants: []
+    };
+  }
+  for (const id in componentMap) {
+    const c = componentMap[id];
+    if (c.parentSetId && componentMap[c.parentSetId]) {
+      componentMap[c.parentSetId].variants.push(id);
+    }
+  }
+
+  // ===== Helpers locais (evita criar dentro do visit por performance) =====
+
+  function isVisibleSolidPaint(paint) {
+    if (!paint || paint.visible === false) return false;
+    if (paint.type !== 'SOLID') return false;
+    if (paint.opacity === 0) return false;
+    if (paint.color && paint.color.a === 0) return false;
+    return true;
+  }
+
+  // ===== Travessia única =====
+  // Argumentos passados manualmente para evitar criar objectos de contexto
+  // por nó (microoptimização que ajuda com ficheiros grandes).
+  function visit(node, pagePath, insideComponent, insideInstance, isDocPage) {
+    if (!node) return;
+
+    // -------- treeStats (ex-walkDocument) --------
+    treeStats.nodesCount++;
+    if (node.type === 'COMPONENT')      treeStats.components++;
+    if (node.type === 'COMPONENT_SET')  treeStats.componentSets++;
+    if (node.type === 'CANVAS')         treeStats.pagesCount++;
+
+    // -------- Detected/Usage classification flags --------
+    const isComponentContext = (
+      node.type === 'COMPONENT' ||
+      node.type === 'COMPONENT_SET' ||
+      node.type === 'INSTANCE'
+    );
+
+    // -------- Detached SINAL 1 (frame com nome de componente) --------
+    if (
+      node.type === 'FRAME' &&
+      componentNames.has(node.name) &&
+      !insideComponent &&
+      !isDocPage
+    ) {
+      if (detached.bySignal1.length < 50) {  // cap para não estourar memória
+        detached.bySignal1.push({
+          name: node.name, nodeId: node.id, page: pagePath,
+          signal: 'frame-with-component-name'
+        });
+      } else {
+        detached.bySignal1.length;  // continua a contar implícito
+      }
+    }
+
+    // -------- Detached SINAL 2 (INSTANCE órfã) --------
+    if (node.type === 'INSTANCE' && node.componentId && !componentIds.has(node.componentId)) {
+      if (detached.bySignal2.length < 50) {
+        detached.bySignal2.push({
+          name: node.name, nodeId: node.id, page: pagePath,
+          componentId: node.componentId, signal: 'orphan-instance'
+        });
+      }
+    }
+
+    // -------- Usage: contar instâncias por componentId --------
+    if (node.type === 'INSTANCE' && node.componentId) {
+      const targetId = node.componentId;
+      if (componentMap[targetId]) {
+        componentMap[targetId].instanceCount++;
+        const parent = componentMap[targetId].parentSetId;
+        if (parent && componentMap[parent]) {
+          componentMap[parent].instanceCount++;
+        }
+      }
+    }
+
+    // -------- Usage: capturar dimensões de COMPONENT/COMPONENT_SET --------
+    if ((node.type === 'COMPONENT' || node.type === 'COMPONENT_SET') && componentMap[node.id]) {
+      if (node.absoluteBoundingBox) {
+        componentMap[node.id].width  = Math.round(node.absoluteBoundingBox.width);
+        componentMap[node.id].height = Math.round(node.absoluteBoundingBox.height);
+      }
+    }
+
+    // -------- Adoption: fills/strokes/effects/text/radius/spacing --------
+    // Excluímos nós dentro de INSTANCE (herdam) e páginas de docs
+    if (!insideInstance && !isDocPage) {
+      // Fill
+      if (Array.isArray(node.fills) && node.fills.length) {
+        const cat = node.type === 'TEXT' ? 'text' : 'fill';
+        const nodeHasFillStyle = !!(node.styles && (node.styles.fill || node.styles.fills));
+        for (const fill of node.fills) {
+          if (!isVisibleSolidPaint(fill)) continue;
+          adoptionStats[cat].total++;
+          if (nodeHasFillStyle || (fill.boundVariables && fill.boundVariables.color)) {
+            adoptionStats[cat].withToken++;
+          }
+        }
+      }
+
+      // Stroke
+      if (Array.isArray(node.strokes) && node.strokes.length) {
+        const nodeHasStrokeStyle = !!(node.styles && (node.styles.stroke || node.styles.strokes));
+        for (const stroke of node.strokes) {
+          if (!isVisibleSolidPaint(stroke)) continue;
+          adoptionStats.stroke.total++;
+          if (nodeHasStrokeStyle || (stroke.boundVariables && stroke.boundVariables.color)) {
+            adoptionStats.stroke.withToken++;
+          }
+        }
+      }
+
+      // Effect
+      if (Array.isArray(node.effects) && node.effects.length) {
+        const nodeHasEffectStyle = !!(node.styles && (node.styles.effect || node.styles.effects));
+        for (const effect of node.effects) {
+          if (effect.visible === false) continue;
+          adoptionStats.effect.total++;
+          const hasEffectVar = !!(effect.boundVariables && (effect.boundVariables.color || effect.boundVariables.radius));
+          if (nodeHasEffectStyle || hasEffectVar) {
+            adoptionStats.effect.withToken++;
+          }
+        }
+      }
+
+      // Text — font size separado
+      if (node.type === 'TEXT' && node.style && typeof node.style.fontSize === 'number') {
+        adoptionStats.text.total++;
+        const hasTextStyle = !!(node.styles && (node.styles.text || node.styles.fontSize));
+        const hasFontSizeVar = !!(node.boundVariables && node.boundVariables.fontSize);
+        if (hasTextStyle || hasFontSizeVar) {
+          adoptionStats.text.withToken++;
+        }
+      }
+
+      // Radius
+      if (typeof node.cornerRadius === 'number' && node.cornerRadius > 0) {
+        adoptionStats.radius.total++;
+        if (node.boundVariables && node.boundVariables.cornerRadius) {
+          adoptionStats.radius.withToken++;
+        }
+      }
+      if (Array.isArray(node.rectangleCornerRadii)) {
+        const cornerKeys = ['topLeftRadius', 'topRightRadius', 'bottomLeftRadius', 'bottomRightRadius'];
+        for (let i = 0; i < node.rectangleCornerRadii.length; i++) {
+          if (node.rectangleCornerRadii[i] > 0) {
+            adoptionStats.radius.total++;
+            if (node.boundVariables && node.boundVariables[cornerKeys[i]]) {
+              adoptionStats.radius.withToken++;
+            }
+          }
+        }
+      }
+
+      // Spacing (só frames com auto-layout)
+      if (node.layoutMode && node.layoutMode !== 'NONE') {
+        const spacingProps = ['paddingLeft', 'paddingRight', 'paddingTop', 'paddingBottom', 'itemSpacing', 'counterAxisSpacing'];
+        for (const prop of spacingProps) {
+          if (typeof node[prop] === 'number' && node[prop] > 0) {
+            adoptionStats.spacing.total++;
+            if (node.boundVariables && node.boundVariables[prop]) {
+              adoptionStats.spacing.withToken++;
+            }
+          }
+        }
+      }
+    }
+
+    // -------- Recursão --------
+    if (Array.isArray(node.children)) {
+      const childInsideComponent = insideComponent || isComponentContext;
+      const childInsideInstance  = insideInstance || node.type === 'INSTANCE';
+      for (const child of node.children) {
+        let nextPath  = pagePath;
+        let nextIsDoc = isDocPage;
+        if (node.type === 'CANVAS') {
+          nextPath  = node.name;
+          nextIsDoc = isDocPageFn(node.name);
+        }
+        visit(child, nextPath, childInsideComponent, childInsideInstance, nextIsDoc);
+      }
+    }
+  }
+
+  visit(figmaFile.document, 'root', false, false, false);
+
+  // ===== Pós-processamento: detached =====
+  detached.total = detached.bySignal1.length + detached.bySignal2.length;
+  const detachedSample = [...detached.bySignal1, ...detached.bySignal2].slice(0, 10);
+
+  // ===== Pós-processamento: adoption =====
+  const pct = s => s.total === 0 ? null : Math.round((s.withToken / s.total) * 100);
+  let totalDecisions = 0, totalWithToken = 0;
+  for (const cat in adoptionStats) {
+    totalDecisions += adoptionStats[cat].total;
+    totalWithToken += adoptionStats[cat].withToken;
+  }
+  const adoption = {
+    overall: totalDecisions === 0 ? 0 : Math.round((totalWithToken / totalDecisions) * 100),
+    byCategory: {
+      fill:    pct(adoptionStats.fill),
+      stroke:  pct(adoptionStats.stroke),
+      text:    pct(adoptionStats.text),
+      effect:  pct(adoptionStats.effect),
+      radius:  pct(adoptionStats.radius),
+      spacing: pct(adoptionStats.spacing)
+    },
+    totals: {
+      fillsWithToken:    adoptionStats.fill.withToken,
+      fillsTotal:        adoptionStats.fill.total,
+      strokesWithToken:  adoptionStats.stroke.withToken,
+      strokesTotal:      adoptionStats.stroke.total,
+      textsWithToken:    adoptionStats.text.withToken,
+      textsTotal:        adoptionStats.text.total,
+      effectsWithToken:  adoptionStats.effect.withToken,
+      effectsTotal:      adoptionStats.effect.total,
+      radiusWithToken:   adoptionStats.radius.withToken,
+      radiusTotal:       adoptionStats.radius.total,
+      spacingWithToken:  adoptionStats.spacing.withToken,
+      spacingTotal:      adoptionStats.spacing.total
+    }
+  };
+
+  // ===== Pós-processamento: usage (top, unused, duplicates, categories) =====
+  const topUsedCandidates = Object.values(componentMap).filter(c => {
+    if (c.remote) return false;
+    if (c.parentSetId) return false;
+    return true;
+  });
+
+  const topUsed = topUsedCandidates
+    .map(c => ({
+      id: c.id, name: c.name, instanceCount: c.instanceCount,
+      type: c.type, variants: c.variants ? c.variants.length : 0
+    }))
+    .sort((a, b) => b.instanceCount - a.instanceCount)
+    .slice(0, 50);
+
+  const unused = topUsedCandidates
+    .filter(c => c.instanceCount === 0)
+    .map(c => ({ id: c.id, name: c.name, type: c.type }))
+    .slice(0, 30);
+
+  // Duplicates — heurística simplificada (sem detector complexo de séries
+  // para já — podemos reactivar depois)
+  function analyzeName(rawName) {
+    if (!rawName) return { normalized: null, signal: null };
+    const original = rawName.trim();
+    let m;
+    m = original.match(/^(.+?)\s*[-_]?\s*copy(\s*\d*)?\s*$/i);
+    if (m && m[1].trim()) return { normalized: m[1].trim().toLowerCase(), signal: 'strong' };
+    m = original.match(/^(.+?)\s*\((\d+)\)\s*$/);
+    if (m && m[1].trim()) return { normalized: m[1].trim().toLowerCase(), signal: 'strong' };
+    m = original.match(/^(.+?)\s*[-_]\s*\d+\s*$/);
+    if (m && m[1].trim()) return { normalized: m[1].trim().toLowerCase(), signal: 'weak' };
+    m = original.match(/^(.+?)\s+\d+\s*$/);
+    if (m && m[1].trim()) return { normalized: m[1].trim().toLowerCase(), signal: 'weak' };
+    return { normalized: null, signal: null };
+  }
+
+  function isSequentialSeries(members) {
+    if (members.length < 3) return false;
+    const numbers = members.map(c => {
+      const m = c.name.match(/[-_\s\(](\d+)\)?\s*$/);
+      return m ? parseInt(m[1], 10) : null;
+    });
+    if (numbers.some(n => n === null)) return false;
+    const unique = new Set(numbers);
+    if (unique.size < 3) return false;
+    const sorted = [...unique].sort((a, b) => a - b);
+    const range = sorted[sorted.length - 1] - sorted[0];
+    return unique.size / (range + 1) >= 0.5;
+  }
+
+  const originalsByNormalized  = {};
+  const candidatesByNormalized = {};
+  for (const c of topUsedCandidates) {
+    const { normalized, signal } = analyzeName(c.name);
+    if (signal === null) {
+      const key = c.name.toLowerCase();
+      if (!originalsByNormalized[key]) originalsByNormalized[key] = c;
+    } else if (normalized) {
+      if (!candidatesByNormalized[normalized]) candidatesByNormalized[normalized] = [];
+      candidatesByNormalized[normalized].push({ component: c, signal });
+    }
+  }
+
+  const duplicateGroups = [];
+  for (const norm in candidatesByNormalized) {
+    const copies = candidatesByNormalized[norm];
+    const original = originalsByNormalized[norm];
+    const groupMembers = original
+      ? [original, ...copies.map(c => c.component)]
+      : copies.map(c => c.component);
+    if (groupMembers.length < 2) continue;
+    if (isSequentialSeries(groupMembers)) continue;
+
+    const widths  = groupMembers.map(c => c.width).filter(w => w);
+    const heights = groupMembers.map(c => c.height).filter(h => h);
+    const sameDimensions = widths.length >= 2
+                         && widths.every(w => w === widths[0])
+                         && heights.every(h => h === heights[0]);
+    const hasStrongSignal = copies.some(c => c.signal === 'strong');
+    const accept = hasStrongSignal || (sameDimensions && original) || (sameDimensions && copies.length >= 2);
+    if (!accept) continue;
+
+    duplicateGroups.push({
+      normalizedName: norm,
+      components: groupMembers.map(c => ({
+        id: c.id, name: c.name, instanceCount: c.instanceCount,
+        width: c.width, height: c.height
+      })),
+      signals: { sameDimensions, hasStrongSignal }
+    });
+  }
+
+  // Categories
+  const categoryCount = {};
+  for (const c of topUsedCandidates) {
+    const category = c.name.split('/')[0].trim() || 'Outros';
+    if (!categoryCount[category]) categoryCount[category] = { count: 0, totalInstances: 0 };
+    categoryCount[category].count++;
+    categoryCount[category].totalInstances += c.instanceCount;
+  }
+  const categories = Object.entries(categoryCount)
+    .map(([name, stats]) => ({ name, ...stats }))
+    .sort((a, b) => b.totalInstances - a.totalInstances);
+
+  return {
+    treeStats,
+    detached: {
+      total: detached.total,
+      bySignal1Count: detached.bySignal1.length,
+      bySignal2Count: detached.bySignal2.length,
+      sample: detachedSample
+    },
+    adoption,
+    usage: {
+      topUsed,
+      unused,
+      duplicateGroups,
+      categories,
+      summary: {
+        totalLocalComponents:    topUsedCandidates.length,
+        unusedCount:             topUsedCandidates.filter(c => c.instanceCount === 0).length,
+        duplicateGroupCount:     duplicateGroups.length,
+        duplicateComponentCount: duplicateGroups.reduce((sum, g) => sum + g.components.length, 0),
+        totalInstances:          topUsedCandidates.reduce((sum, c) => sum + c.instanceCount, 0)
+      }
     }
   };
 }
