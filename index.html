@@ -3501,25 +3501,23 @@
     /* =========================================================
        HEALTH SCORE REAL — calculado a partir de sinais reais
        ---------------------------------------------------------
-       Fórmula (revista):
+       Fórmula:
          score = 60 (base mínima decente)
                  + (adoption × 0.4)    ← bónus até +40 por boa adopção
                  − penaltyDetached     ← até -25
-                 − penaltyUnused       ← até -15
                  − penaltyDuplicates   ← até -15
 
-       Mudança vs versão anterior: adopção deixou de ser factor
-       multiplicativo (que punia demais sistemas em transição).
-       Agora é bónus aditivo a uma base de 60. Um sistema com
-       adopção 0% e sem outros problemas marca 60 (não 10), o
-       que é mais alinhado com a realidade de Design Systems
-       em produção — a maioria vive na zona 60-90.
+       Mudança vs versão anterior: removida a penalização por
+       "componentes não usados". Razão: alinhamento com a decisão
+       de tratar "não usados" como higiene da library (candidatos
+       a deprecação), não como problema de saúde do sistema.
+
+       Componentes não usados continuam visíveis na página
+       Componentes (filtro "Nunca usados") e nos insights, mas
+       deixam de afectar o score numérico.
 
        Penalizações com saturação (min/max): primeira dezena de
        cada problema é o que mais dói; daí em diante, satura.
-
-       Resultado categorizado em múltiplos de 10 para evitar
-       precisão falsa.
        ========================================================= */
     function computeHealthScore(data) {
       // Verifica se temos pelo menos algum sinal real
@@ -3531,25 +3529,20 @@
       if (!hasReal) return data.score;
 
       // 1. Base 60 + bónus de adopção (até +40)
-      // Se não temos dados de adopção, assumimos 80 (penalização leve)
-      // — não é justo penalizar sem informação, mas também não inflacionar
       const adoption = (data.realAdoption && typeof data.realAdoption.overall === 'number')
         ? data.realAdoption.overall
         : 80;
       let score = 60 + (adoption * 0.4);
 
-      // 2. Penalizações (saturadas)
+      // 2. Penalizações (saturadas) — apenas detached e duplicados.
+      // "Não usados" tornou-se higiene da library, não problema de saúde.
       const detached    = data.detached || 0;
-      const unused      = (data.componentUsage && data.componentUsage.summary)
-                          ? (data.componentUsage.summary.unusedCount || 0)
-                          : 0;
       const duplicates  = data.duplicates || 0;
 
       const penaltyDetached   = Math.min(25, detached   * 0.3);
-      const penaltyUnused     = Math.min(15, unused     * 0.5);
       const penaltyDuplicates = Math.min(15, duplicates * 2);
 
-      score = score - penaltyDetached - penaltyUnused - penaltyDuplicates;
+      score = score - penaltyDetached - penaltyDuplicates;
 
       // 3. Garantir limites razoáveis [10, 100]
       score = Math.max(10, Math.min(100, score));
@@ -3852,11 +3845,16 @@
       }
 
       if (unusedCount >= 5) {
-        const impact = Math.min(15, unusedCount * 0.5);
+        // "Não usados" deixou de penalizar o score (decisão de produto:
+        // são higiene da library, não problema de saúde). Mantemos a
+        // prioridade na lista — vale a pena agir — mas o label do
+        // impact deixa de prometer +X pontos. weight=0 envia esta
+        // prioridade para o fim da lista, o que faz sentido por
+        // ser de baixa urgência.
         priorities.push({
           text: `Deprecar ${unusedCount} componentes sem uso`,
-          impact: `+${Math.round(impact)} no score`,
-          weight: impact
+          impact: 'Higiene da library',
+          weight: 0
         });
       }
 
@@ -4016,32 +4014,26 @@
       // --- Metric cards ---
       $('#m-coverage').textContent        = data.coverage + '%';
 
-      /* Inconsistências = soma de 3 sinais reais (todos contagens).
-         Fonte de cada parte:
-           - detached:        instâncias soltas da library
-           - duplicates:      grupos de duplicados
-           - unused:          componentes com 0 instâncias
+      /* Inconsistências = soma de 2 sinais REAIS de problemas:
+           - detached:    instâncias soltas da library (alta severidade)
+           - duplicates:  grupos potencialmente duplicados (média severidade)
 
-         Decisão: a adopção NÃO entra na contagem (é uma percentagem,
-         não uma contagem de problemas — somar 34% com 15 detached
-         dá um número sem significado claro). A adopção continua a
-         ser visível no card "Cobertura do DS" e nos insights. */
-      const unusedCount     = (data.componentUsage && data.componentUsage.summary)
-        ? (data.componentUsage.summary.unusedCount || 0)
-        : 0;
+         Decisão: "não usados" NÃO entra aqui — são candidatos a deprecação,
+         não inconsistências propriamente ditas. Continuam visíveis na
+         página Componentes (filtro "Nunca usados") e no Health Score.
+         "Adopção" também não entra (é uma percentagem, não uma contagem).
+
+         Resultado: o número reflecte problemas reais que requerem acção. */
       const inconsistenciesReal =
             (data.detached   || 0)
-          + (data.duplicates || 0)
-          + unusedCount;
+          + (data.duplicates || 0);
 
       $('#m-inconsistencies').textContent = inconsistenciesReal;
 
-      // Tooltip nativo via title (mostra breakdown ao passar rato).
-      // Cada componente só aparece se for > 0, evita ruído.
+      // Tooltip nativo via title — breakdown apenas das partes que contribuem
       const parts = [];
       if (data.detached   > 0) parts.push(`${data.detached} detached`);
       if (data.duplicates > 0) parts.push(`${data.duplicates} duplicados`);
-      if (unusedCount     > 0) parts.push(`${unusedCount} não usados`);
 
       const tooltipText = parts.length
         ? parts.join(' · ')
