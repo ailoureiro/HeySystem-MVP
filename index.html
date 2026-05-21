@@ -3973,11 +3973,9 @@
       // adopção sintética gerada por análise.
       renderTokensPage(data);
 
-      // --- Página Foundations ---
-      // KPIs dinâmicos: WCAG (% AA), tokens totais ligados. Os KPIs
-      // estáticos (6/6, 4 princípios) já estão no HTML — não mudam.
-      $('#foundations-wcag').textContent   = randInt(88, 99) + '%';
-      $('#foundations-tokens').textContent = data.tokensTotal;
+      // Nota: o render da página Foundations foi removido porque a
+      // página foi eliminada da navegação. Os elementos #foundations-wcag
+      // e #foundations-tokens já não existem no DOM.
     }
 
     /* =========================================================
