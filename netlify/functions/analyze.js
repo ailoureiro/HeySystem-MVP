@@ -195,10 +195,18 @@ function transformFigmaData(figmaFile) {
   const usageAnalysis = detectComponentUsage(figmaFile);
 
   // ----- ETAPA 2: Inconsistências visuais -----
-  // Detecta variações subtis em cor, font sizes e spacing.
-  // Reusa o detector de páginas de documentação para não ter
-  // falsos positivos em exemplos da library.
-  const visualAnalysis = detectVisualInconsistencies(figmaFile, isDocPageFn);
+  // TEMPORARIAMENTE DESACTIVADO: o detector de cores faz O(N²) comparações
+  // (centenas de cores × centenas) e fica muito lento em ficheiros grandes.
+  // Os dados não são actualmente usados em sítios críticos do dashboard
+  // (só apareciam em insights laterais), por isso vale a pena desligar
+  // até optimizarmos o algoritmo. O resto do produto continua a funcionar.
+  const visualAnalysis = {
+    colors:    { count: 0, totalOccurrences: 0, examples: [] },
+    fontSizes: { count: 0, totalOccurrences: 0, examples: [] },
+    spacing:   { count: 0, totalOccurrences: 0, examples: [] }
+  };
+  // Para reactivar: descomenta a linha abaixo e otimiza detectVisualInconsistencies
+  // const visualAnalysis = detectVisualInconsistencies(figmaFile, isDocPageFn);
 
   return {
     fileName:           figmaFile.name,
