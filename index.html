@@ -3107,15 +3107,34 @@
          de loading. O dashboard só renderiza quando AMBOS terminam.
          Se a chamada falhar (ex: dev local sem token, função offline),
          caímos para dados sintéticos — app continua funcional. */
+      let realDataReady = false;
       const realAnalysisPromise = fetchRealAnalysis(url)
+        .then(data => { realDataReady = true; return data; })
         .catch(err => {
+          realDataReady = true;
           console.warn('Fallback para dados sintéticos:', err.message);
-          return null; // sinaliza "usa sintéticos"
+          return null;
         });
 
       // Atualiza o step actual de tempos a tempos
       const tick = async () => {
         if (i >= loadingSteps.length) {
+          /* Se a função ainda está a processar, mostramos mensagem honesta
+             em vez de fingir que está pronto. Ficheiros grandes podem
+             demorar 30-60s na primeira análise. */
+          if (!realDataReady) {
+            const startWait = Date.now();
+            stepEl.textContent = 'A processar ficheiro grande…';
+            // Actualiza o sub-step a cada segundo
+            const waitTick = () => {
+              if (realDataReady) return;
+              const elapsed = Math.floor((Date.now() - startWait) / 1000);
+              stepEl.textContent = `A processar ficheiro grande… (${elapsed}s)`;
+              setTimeout(waitTick, 1000);
+            };
+            waitTick();
+          }
+
           // Espera pelo resultado real (ou null se falhou)
           const realData = await realAnalysisPromise;
           // Termina e gera o dashboard
@@ -3151,6 +3170,11 @@
        que por sua vez chama a Figma API com o token privado.
        Devolve dados reais OU lança erro (apanhado pelo caller,
        que cai para dados sintéticos).
+
+       Timeout: 90 segundos (ficheiros grandes podem demorar).
+       Sem este timeout, abrir o app localmente (file://) faz o
+       loading ficar preso porque a função não existe nesse domínio
+       e o fetch nunca devolve.
        ========================================================= */
     async function fetchRealAnalysis(figmaUrl) {
       // Extrai o fileKey do URL (mesma regex da validação)
@@ -3158,22 +3182,38 @@
       if (!match) throw new Error('Não consegui extrair fileKey do URL');
       const fileKey = match[1];
 
-      const response = await fetch('/.netlify/functions/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fileKey })
-      });
+      // AbortController permite cancelar o fetch após N segundos
+      const controller = new AbortController();
+      const TIMEOUT_MS = 90_000;
+      const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
-      if (!response.ok) {
-        // Tenta ler a mensagem de erro vinda da função
-        let errMsg = `HTTP ${response.status}`;
-        try {
-          const errData = await response.json();
-          if (errData.error) errMsg = errData.error;
-        } catch {}
-        throw new Error(errMsg);
+      try {
+        const response = await fetch('/.netlify/functions/analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fileKey }),
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+          // Tenta ler a mensagem de erro vinda da função
+          let errMsg = `HTTP ${response.status}`;
+          try {
+            const errData = await response.json();
+            if (errData.error) errMsg = errData.error;
+          } catch {}
+          throw new Error(errMsg);
+        }
+        return response.json();
+      } catch (err) {
+        clearTimeout(timeoutId);
+        // AbortError = timeout. Outros erros são propagados como vinham.
+        if (err.name === 'AbortError') {
+          throw new Error(`Timeout: a função demorou mais de ${TIMEOUT_MS/1000}s a responder`);
+        }
+        throw err;
       }
-      return response.json();
     }
 
     /* Mapeia o output da função Netlify para os campos que o
