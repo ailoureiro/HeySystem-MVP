@@ -194,6 +194,12 @@ function transformFigmaData(figmaFile) {
   // Top usados, não usados, e duplicados potenciais.
   const usageAnalysis = detectComponentUsage(figmaFile);
 
+  // ----- ETAPA 2: Inconsistências visuais -----
+  // Detecta variações subtis em cor, font sizes e spacing.
+  // Reusa o detector de páginas de documentação para não ter
+  // falsos positivos em exemplos da library.
+  const visualAnalysis = detectVisualInconsistencies(figmaFile, isDocPageFn);
+
   return {
     fileName:           figmaFile.name,
     lastModified:       figmaFile.lastModified,
@@ -220,6 +226,10 @@ function transformFigmaData(figmaFile) {
     componentUsage:     usageAnalysis,
     duplicates:         usageAnalysis.summary.duplicateGroupCount,
     unusedComponentsCount: usageAnalysis.summary.unusedCount,
+
+    // ETAPA 2 — Inconsistências visuais (dado REAL)
+    // Detecta cores quase-iguais, font sizes fora da escala, spacing arbitrário.
+    visualInconsistencies: visualAnalysis,
 
     // Diagnóstico — decomposição dos styles (tipo + origem)
     stylesBreakdown:    stylesBreakdown,
@@ -932,6 +942,237 @@ function detectComponentUsage(figmaFile) {
       duplicateComponentCount: duplicateGroups.reduce((sum, g) => sum + g.components.length, 0),
       // Total de instâncias é útil para contexto
       totalInstances:          topUsedCandidates.reduce((sum, c) => sum + c.instanceCount, 0)
+    }
+  };
+}
+
+/* =========================================================
+   VISUAL INCONSISTENCIES — detecta variações subtis no design
+   ---------------------------------------------------------
+   Três categorias:
+     1. Cores hardcoded "quase-iguais" — eyedropper accidents
+     2. Font sizes fora da escala dominante
+     3. Spacing fora de múltiplos de 4 (sem Variable ligada)
+
+   Para cada categoria devolve { count, examples }, onde examples
+   é uma lista até 10 dos casos mais frequentes.
+
+   Exclui nós dentro de INSTANCE e páginas de documentação
+   (mesmo critério dos outros detectores).
+   ========================================================= */
+function detectVisualInconsistencies(figmaFile, isDocPageFn) {
+  // ----- 1. Recolha de valores brutos durante a travessia -----
+  // Para cada categoria, coleccionamos os valores que aparecem na
+  // árvore (excluindo instâncias e docs), juntamente com contagem
+  // de ocorrências.
+
+  const colorOccurrences   = new Map();  // "r,g,b" → count
+  const fontSizeFrequency  = new Map();  // size (number) → count
+  const spacingValues      = [];         // [{ value, hasVariable, prop }]
+
+  function rgbToKey(color) {
+    // Quantiza para 8 bits e usa como chave do Map
+    if (!color || typeof color.r !== 'number') return null;
+    const r = Math.round(color.r * 255);
+    const g = Math.round(color.g * 255);
+    const b = Math.round(color.b * 255);
+    return `${r},${g},${b}`;
+  }
+
+  function keyToRgb(key) {
+    const [r, g, b] = key.split(',').map(Number);
+    return { r, g, b };
+  }
+
+  function rgbToHex({ r, g, b }) {
+    const toHex = n => n.toString(16).padStart(2, '0').toUpperCase();
+    return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+  }
+
+  function visit(node, insideInstance, isDocPage) {
+    if (!node) return;
+    const shouldCount = !insideInstance && !isDocPage;
+
+    if (shouldCount) {
+      // ----- CORES HARDCODED -----
+      // Fills sólidos sem token (sem styles.fill e sem boundVariables.color)
+      if (Array.isArray(node.fills)) {
+        const hasStyle = !!(node.styles && (node.styles.fill || node.styles.fills));
+        for (const fill of node.fills) {
+          if (fill.visible === false || fill.type !== 'SOLID') continue;
+          if (fill.opacity === 0) continue;
+          if (fill.color && fill.color.a === 0) continue;
+
+          const hasVariable = !!(fill.boundVariables && fill.boundVariables.color);
+          if (hasStyle || hasVariable) continue;  // tokenizado, ignora
+
+          const key = rgbToKey(fill.color);
+          if (key) colorOccurrences.set(key, (colorOccurrences.get(key) || 0) + 1);
+        }
+      }
+
+      // Mesmo para strokes
+      if (Array.isArray(node.strokes)) {
+        const hasStyle = !!(node.styles && (node.styles.stroke || node.styles.strokes));
+        for (const stroke of node.strokes) {
+          if (stroke.visible === false || stroke.type !== 'SOLID') continue;
+          if (stroke.opacity === 0) continue;
+          if (stroke.color && stroke.color.a === 0) continue;
+
+          const hasVariable = !!(stroke.boundVariables && stroke.boundVariables.color);
+          if (hasStyle || hasVariable) continue;
+
+          const key = rgbToKey(stroke.color);
+          if (key) colorOccurrences.set(key, (colorOccurrences.get(key) || 0) + 1);
+        }
+      }
+
+      // ----- FONT SIZES -----
+      if (node.type === 'TEXT' && node.style && typeof node.style.fontSize === 'number') {
+        const hasTextStyle = !!(node.styles && (node.styles.text || node.styles.fontSize));
+        const hasFontSizeVar = !!(node.boundVariables && node.boundVariables.fontSize);
+        if (!hasTextStyle && !hasFontSizeVar) {
+          const size = Math.round(node.style.fontSize);
+          fontSizeFrequency.set(size, (fontSizeFrequency.get(size) || 0) + 1);
+        }
+      }
+
+      // ----- SPACING (padding + itemSpacing em frames com auto-layout) -----
+      if (node.layoutMode && node.layoutMode !== 'NONE') {
+        const spacingProps = [
+          'paddingLeft', 'paddingRight', 'paddingTop', 'paddingBottom',
+          'itemSpacing', 'counterAxisSpacing'
+        ];
+        for (const prop of spacingProps) {
+          if (typeof node[prop] === 'number' && node[prop] > 0) {
+            const hasVar = !!(node.boundVariables && node.boundVariables[prop]);
+            spacingValues.push({ value: Math.round(node[prop]), hasVariable: hasVar });
+          }
+        }
+      }
+    }
+
+    if (Array.isArray(node.children)) {
+      const childInsideInstance = insideInstance || node.type === 'INSTANCE';
+      for (const child of node.children) {
+        let nextIsDoc = isDocPage;
+        if (node.type === 'CANVAS') nextIsDoc = isDocPageFn(node.name);
+        visit(child, childInsideInstance, nextIsDoc);
+      }
+    }
+  }
+  visit(figmaFile.document, false, false);
+
+  // ----- 2. Análise: CORES "QUASE-IGUAIS" -----
+  // Estratégia: para cada par de cores, calcular distância euclidiana
+  // em RGB. Se distância <= threshold, são "quase-iguais" — provável
+  // eyedropper accident.
+  //
+  // Optimização: ordenar por contagem desc; cor com 100 ocorrências
+  // é a "dominante" do grupo, as quase-iguais são variações.
+
+  const COLOR_THRESHOLD = 8;  // distância euclidiana 0-441 (8 é conservador)
+
+  function colorDistance(c1, c2) {
+    const dr = c1.r - c2.r;
+    const dg = c1.g - c2.g;
+    const db = c1.b - c2.b;
+    return Math.sqrt(dr * dr + dg * dg + db * db);
+  }
+
+  // Lista de cores ordenadas por ocorrências (desc)
+  const colorList = Array.from(colorOccurrences.entries())
+    .map(([key, count]) => ({ key, count, rgb: keyToRgb(key) }))
+    .sort((a, b) => b.count - a.count);
+
+  // Para cada cor, procura "quase-iguais" entre as outras (com menos uso).
+  // Marca apenas os pares onde a quase-igual tem MENOS uso — assumimos
+  // que a mais usada é "a oficial" e as menos usadas são variações.
+  const colorInconsistencies = [];
+  const alreadyFlagged = new Set();
+
+  for (let i = 0; i < colorList.length; i++) {
+    const dominant = colorList[i];
+    for (let j = i + 1; j < colorList.length; j++) {
+      const candidate = colorList[j];
+      if (alreadyFlagged.has(candidate.key)) continue;
+      const dist = colorDistance(dominant.rgb, candidate.rgb);
+      if (dist > 0 && dist <= COLOR_THRESHOLD) {
+        colorInconsistencies.push({
+          hex: rgbToHex(candidate.rgb),
+          occurrences: candidate.count,
+          similarTo: rgbToHex(dominant.rgb),
+          similarToOccurrences: dominant.count,
+          distance: Math.round(dist * 10) / 10
+        });
+        alreadyFlagged.add(candidate.key);
+      }
+    }
+  }
+
+  // ----- 3. Análise: FONT SIZES fora da escala dominante -----
+  // "Escala dominante" = os ~6-8 tamanhos mais usados. Tudo o resto
+  // é fora-da-escala.
+
+  const sizesSorted = Array.from(fontSizeFrequency.entries())
+    .map(([size, count]) => ({ size, count }))
+    .sort((a, b) => b.count - a.count);
+
+  // Os 8 mais usados formam a escala oficial implícita
+  const dominantScale = new Set(sizesSorted.slice(0, 8).map(s => s.size));
+
+  const fontSizeInconsistencies = sizesSorted
+    .filter(s => !dominantScale.has(s.size))
+    .map(s => ({
+      size: s.size,
+      occurrences: s.count,
+      suggestion: nearestScaleValue(s.size, dominantScale)
+    }));
+
+  function nearestScaleValue(value, scaleSet) {
+    const scale = Array.from(scaleSet);
+    if (!scale.length) return null;
+    return scale.reduce((nearest, s) =>
+      Math.abs(s - value) < Math.abs(nearest - value) ? s : nearest
+    );
+  }
+
+  // ----- 4. Análise: SPACING fora de múltiplos de 4 -----
+  // Aceita: múltiplos de 4 OU valores com Variable ligada (tokenizado)
+  // Rejeita: 15, 17, 23, etc. (provavelmente arbitrários)
+
+  const spacingFrequency = new Map();  // value → { count, hasVariable }
+  for (const s of spacingValues) {
+    if (s.hasVariable) continue;  // tokenizado, ignora
+    if (s.value % 4 === 0) continue;  // múltiplo de 4, válido
+    if (s.value === 1 || s.value === 2) continue;  // 1px/2px borders/dividers
+    spacingFrequency.set(s.value, (spacingFrequency.get(s.value) || 0) + 1);
+  }
+
+  const spacingInconsistencies = Array.from(spacingFrequency.entries())
+    .map(([value, count]) => ({
+      value,
+      occurrences: count,
+      suggestion: Math.round(value / 4) * 4  // múltiplo de 4 mais próximo
+    }))
+    .sort((a, b) => b.occurrences - a.occurrences);
+
+  // ----- 5. Retornar resultados (cap em 10 exemplos por categoria) -----
+  return {
+    colors: {
+      count: colorInconsistencies.length,
+      totalOccurrences: colorInconsistencies.reduce((sum, c) => sum + c.occurrences, 0),
+      examples: colorInconsistencies.slice(0, 10)
+    },
+    fontSizes: {
+      count: fontSizeInconsistencies.length,
+      totalOccurrences: fontSizeInconsistencies.reduce((sum, f) => sum + f.occurrences, 0),
+      examples: fontSizeInconsistencies.slice(0, 10)
+    },
+    spacing: {
+      count: spacingInconsistencies.length,
+      totalOccurrences: spacingInconsistencies.reduce((sum, s) => sum + s.occurrences, 0),
+      examples: spacingInconsistencies.slice(0, 10)
     }
   };
 }
