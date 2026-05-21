@@ -767,41 +767,133 @@ function detectComponentUsage(figmaFile) {
   // Estratégia: agrupar componentes por nome "normalizado".
   // Se 2+ caem no mesmo grupo → suspeitos de duplicado.
 
-  // Função para normalizar nomes removendo sufixos suspeitos
-  function normalizeName(name) {
-    return name
-      .toLowerCase()
-      .replace(/\s*[-_]?\s*copy(\s*\d*)?\s*$/i, '')      // "copy", "copy 2"
-      .replace(/\s*[-_]?\s*\(\d+\)\s*$/, '')             // "(1)", "(2)"
-      .replace(/\s*[-_]\s*\d+\s*$/, '')                  // "-2", "_3"
-      .replace(/\s+\d+\s*$/, '')                         // " 2" no fim
-      .trim();
+  /* Detecção de duplicados — versão conservadora.
+     Em vez de normalizar nomes agressivamente (causa muitos falsos
+     positivos com "Heading 1/2/3", "Icon 16/24/32"), exigimos
+     sinais EXPLÍCITOS de cópia:
+
+       Sinal forte (suficiente sozinho):
+         - sufixo " copy", "copy 2"
+         - sufixo "(1)", "(2)"
+       Sinal fraco (precisa de confirmação por dimensões iguais):
+         - sufixo "-2", " 2" (pode ser variante legítima)
+
+     Resultado: muito mais conservador, evitamos contar variantes
+     numeradas legítimas como duplicados. */
+
+  // Devolve { normalized, signal: 'strong' | 'weak' | null }
+  function analyzeName(name) {
+    const original = name;
+
+    // Sinal forte: " copy" ou " copy 2"
+    let m = original.match(/^(.+?)\s*[-_]?\s*copy(\s*\d*)?\s*$/i);
+    if (m && m[1].trim()) return { normalized: m[1].trim().toLowerCase(), signal: 'strong' };
+
+    // Sinal forte: "(1)", "(2)"
+    m = original.match(/^(.+?)\s*\(\d+\)\s*$/);
+    if (m && m[1].trim()) return { normalized: m[1].trim().toLowerCase(), signal: 'strong' };
+
+    // Sinal fraco: "Name-2", "Name_3" (pode ser variante legítima)
+    m = original.match(/^(.+?)\s*[-_]\s*\d+\s*$/);
+    if (m && m[1].trim()) return { normalized: m[1].trim().toLowerCase(), signal: 'weak' };
+
+    // Sinal fraco: "Name 2" (espaço + número no fim)
+    // CUIDADO: isto pega em "Heading 2" → tratamos como fraco para exigir dimensões
+    m = original.match(/^(.+?)\s+\d+\s*$/);
+    if (m && m[1].trim()) return { normalized: m[1].trim().toLowerCase(), signal: 'weak' };
+
+    return { normalized: null, signal: null };
   }
 
-  // Agrupa por nome normalizado
-  const normalizedGroups = {};
+  // Agrupa apenas componentes que TÊM sinal de cópia + um "irmão" sem sinal
+  // (o "irmão" é o componente "original" do qual estes seriam cópias).
+  const originalsByNormalized = {};       // nome → componente "original" (sem sinal)
+  const candidatesByNormalized = {};      // nome → [cópias suspeitas com sinal]
+
   for (const c of topUsedCandidates) {
-    const norm = normalizeName(c.name);
-    if (!norm) continue;
-    if (!normalizedGroups[norm]) normalizedGroups[norm] = [];
-    normalizedGroups[norm].push(c);
+    const { normalized, signal } = analyzeName(c.name);
+    if (signal === null) {
+      // É um candidato a "original" — guardamos pelo nome em lowercase
+      const key = c.name.toLowerCase();
+      if (!originalsByNormalized[key]) originalsByNormalized[key] = c;
+    } else if (normalized) {
+      if (!candidatesByNormalized[normalized]) candidatesByNormalized[normalized] = [];
+      candidatesByNormalized[normalized].push({ component: c, signal });
+    }
   }
 
-  // Filtra grupos com 2+ candidatos → suspeitos de duplicado
+  // Filtra: só consideramos duplicado se existir "original" com o mesmo nome
+  // normalizado, OU se houver 2+ cópias suspeitas entre si.
   const duplicateGroups = [];
-  for (const norm in normalizedGroups) {
-    const group = normalizedGroups[norm];
-    if (group.length < 2) continue;
 
-    // Sinais extra de confiança:
-    //  - Dimensões iguais reforça a hipótese
-    //  - Diferença grande em uso (um muito usado, outro com 0/1) reforça
-    const widths = group.map(c => c.width).filter(w => w);
-    const sameDimensions = widths.length >= 2 && widths.every(w => w === widths[0]);
+  /* Helper: detecta se um grupo é uma SÉRIE NUMÉRICA SEQUENCIAL legítima.
+     Ex: calendar-day-1, calendar-day-2, ..., calendar-day-31 (dias do mês)
+     Ex: icon-step-01, icon-step-02, icon-step-03 (steps numerados)
+     Ex: avatar-1, avatar-2, ..., avatar-20 (avatares numerados)
+
+     Estes NÃO são duplicados — são variações intencionais.
+
+     Critério: 3+ membros do grupo têm sufixos numéricos distintos
+     formando uma sequência (ex: 1,2,3 ou 1,3,5 com ≥3 valores únicos).
+     Se sim, o grupo é uma série, não duplicado. */
+  function isSequentialSeries(members) {
+    if (members.length < 3) return false;  // 2 elementos não fazem série
+
+    // Extrai número do final do nome (suporta "-1", " 1", "_1", "(1)")
+    const numbers = members.map(c => {
+      const m = c.name.match(/[-_\s\(](\d+)\)?\s*$/);
+      return m ? parseInt(m[1], 10) : null;
+    });
+
+    // Todos têm número? (se um falhar, não é série coerente)
+    if (numbers.some(n => n === null)) return false;
+
+    // Pelo menos 3 valores distintos
+    const unique = new Set(numbers);
+    if (unique.size < 3) return false;
+
+    // Os números devem cobrir uma gama coerente
+    // (ex: 1-5 ou 1,2,3,4,5,...,31). Não basta 1, 1000, 5000.
+    const sorted = [...unique].sort((a, b) => a - b);
+    const range = sorted[sorted.length - 1] - sorted[0];
+    // Densidade: pelo menos 50% dos números do intervalo estão presentes
+    // (1,2,3,4,5 → range 4, 5 únicos → 5/(4+1) = 100% ✓)
+    // (1,5,99 → range 98, 3 únicos → 3/99 = 3% ✗)
+    const density = unique.size / (range + 1);
+    return density >= 0.5;
+  }
+
+  for (const norm in candidatesByNormalized) {
+    const copies = candidatesByNormalized[norm];
+    const original = originalsByNormalized[norm];
+
+    // Lista final do grupo: original (se existir) + cópias suspeitas
+    const groupMembers = original ? [original, ...copies.map(c => c.component)]
+                                  : copies.map(c => c.component);
+
+    if (groupMembers.length < 2) continue;
+
+    // Excluir séries sequenciais legítimas (calendar-day-1, icon-step-01, etc.)
+    if (isSequentialSeries(groupMembers)) continue;
+
+    // Sinal extra de confiança: dimensões iguais
+    const widths  = groupMembers.map(c => c.width).filter(w => w);
+    const heights = groupMembers.map(c => c.height).filter(h => h);
+    const sameDimensions = widths.length >= 2
+                         && widths.every(w => w === widths[0])
+                         && heights.every(h => h === heights[0]);
+
+    // Regra de aceitação final:
+    //   - se há sinal FORTE em alguma cópia → aceita sempre
+    //   - se só há sinais fracos → exige dimensões iguais OU presença do "original"
+    const hasStrongSignal = copies.some(c => c.signal === 'strong');
+    const accept = hasStrongSignal || (sameDimensions && original) || (sameDimensions && copies.length >= 2);
+
+    if (!accept) continue;
 
     duplicateGroups.push({
       normalizedName: norm,
-      components: group.map(c => ({
+      components: groupMembers.map(c => ({
         id: c.id,
         name: c.name,
         instanceCount: c.instanceCount,
@@ -810,7 +902,7 @@ function detectComponentUsage(figmaFile) {
       })),
       signals: {
         sameDimensions,
-        suffixVariation: true  // sempre verdade se chegou aqui
+        hasStrongSignal
       }
     });
   }

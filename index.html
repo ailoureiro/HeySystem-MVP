@@ -2590,7 +2590,6 @@
                 <div class="stat">
                   <p class="stat__label">Total</p>
                   <p class="stat__value" id="comp-total">—</p>
-                  <span class="stat__delta" id="comp-new">+0 no último mês</span>
                 </div>
                 <div class="stat">
                   <p class="stat__label">Duplicados</p>
@@ -2901,7 +2900,6 @@
             <div class="metric metric--mint">
               <p class="metric__label">Total de componentes</p>
               <p class="metric__value" id="comp-page-total">—</p>
-              <span class="metric__trend metric__trend--up" id="comp-page-new">+0 no último mês</span>
             </div>
             <div class="metric metric--peach">
               <p class="metric__label">Detached</p>
@@ -4018,37 +4016,32 @@
       // --- Metric cards ---
       $('#m-coverage').textContent        = data.coverage + '%';
 
-      /* Inconsistências = soma de 4 sinais reais.
+      /* Inconsistências = soma de 3 sinais reais (todos contagens).
          Fonte de cada parte:
-           - detached:        já real
-           - duplicates:      grupos de duplicados (já real)
-           - unused:          componentes com 0 instâncias (já real)
-           - adoptionDeficit: 100 - adoption.overall (penaliza baixa adopção)
+           - detached:        instâncias soltas da library
+           - duplicates:      grupos de duplicados
+           - unused:          componentes com 0 instâncias
 
-         O cálculo só roda valores reais quando existem; se um sinal não
-         chegou (ex: análise sintética), simplesmente entra como 0 — o
-         número total fica subestimado mas nunca inflacionado. */
-      const adoptionDeficit = data.realAdoption && typeof data.realAdoption.overall === 'number'
-        ? Math.max(0, 100 - data.realAdoption.overall)
-        : 0;
+         Decisão: a adopção NÃO entra na contagem (é uma percentagem,
+         não uma contagem de problemas — somar 34% com 15 detached
+         dá um número sem significado claro). A adopção continua a
+         ser visível no card "Cobertura do DS" e nos insights. */
       const unusedCount     = (data.componentUsage && data.componentUsage.summary)
         ? (data.componentUsage.summary.unusedCount || 0)
         : 0;
       const inconsistenciesReal =
             (data.detached   || 0)
           + (data.duplicates || 0)
-          + unusedCount
-          + adoptionDeficit;
+          + unusedCount;
 
       $('#m-inconsistencies').textContent = inconsistenciesReal;
 
       // Tooltip nativo via title (mostra breakdown ao passar rato).
-      // Cada componente só aparece se for > 0, evita ruído ("0 detached · 0 duplicados...").
+      // Cada componente só aparece se for > 0, evita ruído.
       const parts = [];
       if (data.detached   > 0) parts.push(`${data.detached} detached`);
       if (data.duplicates > 0) parts.push(`${data.duplicates} duplicados`);
       if (unusedCount     > 0) parts.push(`${unusedCount} não usados`);
-      if (adoptionDeficit > 0) parts.push(`${adoptionDeficit} deficit de adopção`);
 
       const tooltipText = parts.length
         ? parts.join(' · ')
@@ -4071,21 +4064,9 @@
 
       // --- Card componentes ---
       $('#comp-total').textContent       = data.totalComponents;
-
-      /* Subtítulo do "Total" — substituímos o sintético "+X no último mês"
-         por dado real derivado de componentUsage.categories: número de
-         categorias do sistema (prefixos antes do "/") + a maior. */
-      const compNewEl = $('#comp-new');
-      if (data.componentUsage && Array.isArray(data.componentUsage.categories) && data.componentUsage.categories.length) {
-        const cats = data.componentUsage.categories;
-        const topCat = cats[0]; // já vem ordenada por totalInstances desc
-        compNewEl.textContent = cats.length === 1
-          ? `1 categoria · ${topCat.name}`
-          : `${cats.length} categorias · maior: ${topCat.name}`;
-      } else {
-        // Fallback quando não temos dados reais
-        compNewEl.textContent = '+' + (data.newThisMonth || 0) + ' no último mês';
-      }
+      // Nota: subtítulo do card Total removido (era "+X no último mês"
+      // sintético; substituí por categorias mas era trivia. Card fica
+      // limpo apenas com o número.)
 
       $('#comp-duplicates').textContent  = data.duplicates;
       $('#comp-detached').textContent    = data.detached;
@@ -4364,20 +4345,7 @@
     function renderComponentsPage(data) {
       // KPIs no topo
       $('#comp-page-total').textContent      = data.totalComponents;
-
-      // Subtítulo do "Total" — mesma lógica do Overview, coerência
-      // entre os dois sítios que mostram o mesmo conceito.
-      const compPageNewEl = $('#comp-page-new');
-      if (data.componentUsage && Array.isArray(data.componentUsage.categories) && data.componentUsage.categories.length) {
-        const cats = data.componentUsage.categories;
-        const topCat = cats[0];
-        compPageNewEl.textContent = cats.length === 1
-          ? `1 categoria · ${topCat.name}`
-          : `${cats.length} categorias · maior: ${topCat.name}`;
-      } else {
-        compPageNewEl.textContent = '+' + (data.newThisMonth || 0) + ' no último mês';
-      }
-
+      // Subtítulo do "Total" removido (mesma decisão do Overview)
       $('#comp-page-detached').textContent   = data.detached;
       $('#comp-page-duplicates').textContent = data.duplicates;
       $('#comp-page-health').textContent     = data.compHealth + '%';
