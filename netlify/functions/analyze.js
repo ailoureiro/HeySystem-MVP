@@ -59,10 +59,19 @@ function extractFigmaFileKey(url) {
 }
 
 function analyzeFigmaFile(file, stylesResponse, figmaUrl) {
-  const components = Object.values(file.components || {});
+  // IMPORTANTE: em file.components, a chave do objeto é o node_id (ex: "1:23"),
+  // não o publish key. Como o array de Object.values() não traz a chave,
+  // usamos Object.entries() e injectamos node_id em cada item.
+  const components = Object.entries(file.components || {}).map(([nodeId, meta]) => ({
+    ...meta,
+    node_id: nodeId
+  }));
   const componentSets = Object.values(file.componentSets || {});
   const styles = stylesResponse?.meta?.styles || [];
 
+  // Componentes "reais" para o utilizador = só componentSets (famílias com variants).
+  // Standalone components (icons, logos, dividers) NÃO contam para o total — são
+  // tipicamente assets, não componentes de UI verdadeiros.
   const compList = componentSets.map(set => {
     const variants = components.filter(c => c.componentSetId === set.node_id);
     return {
@@ -75,25 +84,25 @@ function analyzeFigmaFile(file, stylesResponse, figmaUrl) {
     };
   });
 
-  // Componentes standalone (não pertencem a nenhum set de variants)
-  // Ex: um Logo, Divider, Icon. Aparecem em file.components mas sem componentSetId.
-  const standalone = components.filter(c => !c.componentSetId);
-  standalone.forEach(c => {
-    compList.push({
-      name: c.name,
-      variants: 1,
-      instances: 0,
-      adoption: randInt(60, 95),
-      issues: randInt(0, 5),
-      status: 'active'
-    });
-  });
+  // ─── CRAWL ÚNICO ───
+  // Percorre o document tree uma só vez e devolve:
+  //   - detachedCount: nº de INSTANCEs sem ligação ao main component
+  //   - instancesByComponentId: { "<componentId>": count } — uso por variant
+  const crawlResult = crawlDocument(file.document);
+  const detachedComponents = crawlResult.detachedCount;
 
-  // ─── DETACHED COMPONENTS (real, via crawl) ───
-  // Percorre o document tree e conta nodes type=INSTANCE sem componentId.
-  // Detached = instância que perdeu ligação ao main component (foi apagado
-  // ou deslocado para fora da library).
-  const detachedComponents = countDetachedInstances(file.document);
+  // ─── PREENCHER INSTANCES POR COMPONENTE ───
+  // Para cada componentSet, somamos as instâncias de TODOS os seus variants.
+  // O node.componentId de cada INSTANCE corresponde ao node_id do main component
+  // (= chave do objecto file.components).
+  compList.forEach(comp => {
+    const set = componentSets.find(s => s.name === comp.name);
+    if (!set) return;
+    const variantsOfSet = components.filter(c => c.componentSetId === set.node_id);
+    comp.instances = variantsOfSet.reduce((sum, variant) => {
+      return sum + (crawlResult.instancesByComponentId[variant.node_id] || 0);
+    }, 0);
+  });
 
   const styleByType = groupBy(styles, s => s.style_type);
   return {
@@ -125,15 +134,24 @@ function analyzeFigmaFile(file, stylesResponse, figmaUrl) {
   };
 }
 
-/* Percorre recursivamente toda a árvore de nodes do ficheiro Figma
-   e conta instances cuja ligação ao main component foi quebrada. */
-function countDetachedInstances(rootNode) {
-  let count = 0;
+/* Percorre recursivamente toda a árvore de nodes do ficheiro Figma.
+   Devolve dois agregados num só varrimento (eficiente):
+     - detachedCount: instâncias que perderam ligação ao main component
+     - instancesByComponentId: { componentKey: count } — para contar uso por componente
+
+   NOTA: usamos `componentId` do node INSTANCE como chave, que corresponde
+   ao `key` (não ao `node_id`) do componente em file.components. */
+function crawlDocument(rootNode) {
+  let detachedCount = 0;
+  const instancesByComponentId = {};
+
   function walk(node) {
     if (node.type === 'INSTANCE') {
-      // Sem componentId OU com flag isDetached = perdeu ligação à library
       if (!node.componentId || node.isDetached === true) {
-        count++;
+        detachedCount++;
+      } else {
+        instancesByComponentId[node.componentId] =
+          (instancesByComponentId[node.componentId] || 0) + 1;
       }
     }
     if (node.children && Array.isArray(node.children)) {
@@ -141,7 +159,7 @@ function countDetachedInstances(rootNode) {
     }
   }
   walk(rootNode);
-  return count;
+  return { detachedCount, instancesByComponentId };
 }
 
 function groupBy(arr, fn) {
