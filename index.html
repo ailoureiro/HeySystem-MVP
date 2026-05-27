@@ -2521,29 +2521,40 @@
       return `há ${d} ${d === 1 ? 'dia' : 'dias'}`;
     }
 
-    function startAnalysis(figmaUrl) {
+    async function startAnalysis(figmaUrl) {
       showScreen('loading');
 
       const steps = document.querySelectorAll('#loading-steps .loading-step');
-      // Reset defensivo: garante state limpo se a função for chamada
-      // múltiplas vezes (ex: nova análise via modal sem passar pelo landing).
       steps.forEach(s => s.classList.remove('is-active', 'is-done'));
       let i = 0;
-
-      // Marca os passos sequencialmente para dar a sensação de progressão.
-      const interval = setInterval(() => {
-        if (i > 0) steps[i - 1].classList.replace('is-active', 'is-done');
+      const stepInterval = setInterval(() => {
+        if (i > 0 && steps[i - 1]) steps[i - 1].classList.replace('is-active', 'is-done');
         if (i < steps.length) {
           steps[i].classList.add('is-active');
           i++;
-        } else {
-          clearInterval(interval);
-          // Finaliza, gera os dados e mostra o dashboard.
-          state.data = generateMockData(figmaUrl);
-          renderView('overview');
-          showScreen('dashboard');
         }
-      }, 600);
+      }, 800);
+
+      try {
+        const response = await fetch('/api/analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ figmaUrl })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+
+        clearInterval(stepInterval);
+        steps.forEach(s => { s.classList.remove('is-active'); s.classList.add('is-done'); });
+
+        state.data = data;
+        renderView('overview');
+        showScreen('dashboard');
+      } catch (err) {
+        clearInterval(stepInterval);
+        showScreen('landing');
+        setError(err.message || 'Falha ao analisar. Verifica o URL.');
+      }
     }
 
     /* ============================================================
