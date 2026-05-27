@@ -1,0 +1,13 @@
+{
+  "name": "heysystem",
+  "version": "0.1.0",
+  "description": "Analisador de saúde de Design Systems Figma",
+  "private": true,
+  "scripts": {
+    "dev": "netlify dev",
+    "deploy": "netlify deploy --prod"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

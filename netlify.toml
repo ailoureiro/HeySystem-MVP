@@ -1,24 +1,30 @@
-# =========================================================
-# CONFIGURAÇÃO DO NETLIFY
-# Este ficheiro vive na raiz do projecto e diz à Netlify
-# como construir e servir o site.
-# =========================================================
+# ──────────────────────────────────────────────────────────────
+# HeySystem — Netlify configuration
+# ──────────────────────────────────────────────────────────────
+# Static site (index.html) + serverless functions for Figma API.
 
 [build]
-  # Como o nosso site é puro HTML/CSS/JS, não há "build step".
-  # Apontamos o publish directory para a raiz.
+  # Nada para fazer build: deploys o repo as-is.
   publish = "."
-
-  # Pasta onde a Netlify procura serverless functions.
   functions = "netlify/functions"
 
-# =========================================================
-# REDIRECTS / REWRITES (opcional)
-# Útil se quiseres URLs mais limpos. Não precisas para já.
-# =========================================================
+# ──────────────────────────────────────────────────────────────
+# Headers — security best practices
+# ──────────────────────────────────────────────────────────────
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    # Permite Bootstrap + Google Fonts CDN (já usadas no index.html)
+    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; font-src https://fonts.gstatic.com https://cdn.jsdelivr.net; img-src 'self' data: https:; connect-src 'self' https://api.figma.com;"
 
-# Exemplo: chamar /api/analyze em vez de /.netlify/functions/analyze
-# [[redirects]]
-#   from = "/api/analyze"
-#   to = "/.netlify/functions/analyze"
-#   status = 200
+# ──────────────────────────────────────────────────────────────
+# Redirect — endpoint mais limpo para a function
+# ──────────────────────────────────────────────────────────────
+# Em vez de /.netlify/functions/analyze, o frontend pode chamar /api/analyze
+[[redirects]]
+  from = "/api/analyze"
+  to = "/.netlify/functions/analyze"
+  status = 200
