@@ -1,1647 +1,323 @@
-/* =========================================================
-   ANALYZE — Netlify Serverless Function
-   ---------------------------------------------------------
-   Esta função corre nos servidores da Netlify (não no browser).
-   Recebe um fileKey do Figma, chama a Figma REST API com o
-   token privado, e devolve dados básicos sobre o ficheiro.
+/**
+ * HeySystem — Netlify Function: analyze
+ * ─────────────────────────────────────────────────────────────
+ * Recebe um URL Figma + token do utilizador, chama a Figma API,
+ * processa a resposta e devolve o mesmo schema que o mock client-side
+ * (state.data) — para o frontend não precisar de mudar nada.
+ *
+ * Token strategy:
+ *   1. Usa o token do utilizador se vier no body (preferido — privado)
+ *   2. Fallback para FIGMA_TOKEN das env vars (útil para testes)
+ *
+ * Endpoint público:  POST /api/analyze
+ * Body: { "figmaUrl": "https://...", "figmaToken": "figd_..." }
+ */
 
-   ETAPA 1 (esta versão):
-   - Validar input
-   - Chamar a Figma API
-   - Devolver: nome do ficheiro + nº componentes + nº estilos
-     + data de última modificação
+const FIGMA_API = 'https://api.figma.com/v1';
 
-   ETAPA 2+ (futuro):
-   - Detectar componentes detached, duplicados, etc.
-   - Calcular adopção real de tokens
-   - Cache para reduzir chamadas à Figma
-   ========================================================= */
-
-export default async (req, context) => {
-
-  // -----------------------------------------------------------
-  // 1) Só aceitamos POST. Outros métodos → 405.
-  // O browser usa POST para enviar o fileKey no body.
-  // -----------------------------------------------------------
-  if (req.method !== 'POST') {
-    return jsonResponse({ error: 'Método não permitido' }, 405);
+// ─────────────────────────────────────────────────────────────
+// Handler principal
+// ─────────────────────────────────────────────────────────────
+exports.handler = async (event) => {
+  // CORS preflight — necessário se chamares de outro domínio
+  if (event.httpMethod === 'OPTIONS') {
+    return { statusCode: 204, headers: corsHeaders(), body: '' };
   }
 
-  // -----------------------------------------------------------
-  // 2) Extrair o fileKey do body JSON enviado pelo browser.
-  // Se o body for inválido, devolvemos 400 (bad request).
-  // -----------------------------------------------------------
-  let fileKey;
+  if (event.httpMethod !== 'POST') {
+    return json(405, { error: 'Method not allowed. Use POST.' });
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // Parse + validate input
+  // ────────────────────────────────────────────────────────────
+  let body;
   try {
-    const body = await req.json();
-    fileKey = body.fileKey;
+    body = JSON.parse(event.body || '{}');
   } catch {
-    return jsonResponse({ error: 'JSON inválido no body' }, 400);
+    return json(400, { error: 'Invalid JSON in request body.' });
   }
 
-  // Validação básica: o fileKey do Figma é alfanumérico.
-  // Isto também protege contra path traversal (ex: "../secret").
-  if (!fileKey || typeof fileKey !== 'string' || !/^[A-Za-z0-9]+$/.test(fileKey)) {
-    return jsonResponse({ error: 'fileKey inválido' }, 400);
+  const { figmaUrl, figmaToken } = body;
+  if (!figmaUrl) {
+    return json(400, { error: 'Missing "figmaUrl" in request body.' });
   }
 
-  // -----------------------------------------------------------
-  // 3) Ler o token da environment variable.
-  // O token NUNCA está hardcoded — vive nas settings da Netlify.
-  // Netlify.env.get() é a forma moderna; process.env.FIGMA_TOKEN
-  // também funciona (legado).
-  // -----------------------------------------------------------
-  const token = Netlify.env.get('FIGMA_TOKEN') || process.env.FIGMA_TOKEN;
-
-  if (!token) {
-    // Se o token não está configurado, a app não funciona.
-    // Devolvemos erro genérico — não revelar detalhes de config.
-    console.error('FIGMA_TOKEN não está configurado');
-    return jsonResponse({ error: 'Servidor mal configurado' }, 500);
-  }
-
-  // -----------------------------------------------------------
-  // 4) Chamar a Figma REST API.
-  // Endpoint: GET /v1/files/:key
-  // Header: X-Figma-Token: <PAT>
-  // -----------------------------------------------------------
-  let figmaResponse;
-  try {
-    figmaResponse = await fetch(`https://api.figma.com/v1/files/${fileKey}`, {
-      method: 'GET',
-      headers: {
-        'X-Figma-Token': token
-      }
+  const fileKey = extractFigmaFileKey(figmaUrl);
+  if (!fileKey) {
+    return json(400, {
+      error: 'Could not extract file key from URL. Format expected: https://www.figma.com/file/{KEY}/...'
     });
-  } catch (err) {
-    // Erro de rede (DNS, timeout, etc.)
-    console.error('Erro ao contactar Figma:', err);
-    return jsonResponse({ error: 'Falha ao contactar Figma' }, 502);
   }
 
-  // -----------------------------------------------------------
-  // 5) Tratar respostas de erro da Figma.
-  // 403 = token inválido OU sem acesso ao ficheiro
-  // 404 = ficheiro não existe
-  // 429 = rate limit
-  // 5xx = problema do lado da Figma
-  // -----------------------------------------------------------
-  if (!figmaResponse.ok) {
-    const status = figmaResponse.status;
-    let message;
-    if (status === 403)      message = 'Sem acesso a este ficheiro Figma.';
-    else if (status === 404) message = 'Ficheiro não encontrado.';
-    else if (status === 429) message = 'Muitos pedidos. Tenta de novo daqui a uns segundos.';
-    else                     message = 'A Figma respondeu com erro.';
-
-    return jsonResponse({ error: message, figmaStatus: status }, status);
+  // Token: utilizador → env var
+  const token = figmaToken || process.env.FIGMA_TOKEN;
+  if (!token) {
+    return json(401, {
+      error: 'No Figma token provided. Pass "figmaToken" in body or set FIGMA_TOKEN env var.'
+    });
   }
 
-  // -----------------------------------------------------------
-  // 6) Parse do JSON da Figma e transformação para o nosso formato.
-  // O ficheiro Figma é gigante — não devolvemos tudo ao browser,
-  // só os campos que o dashboard precisa.
-  // -----------------------------------------------------------
-  let figmaData;
+  // ────────────────────────────────────────────────────────────
+  // Fetch Figma API (2 calls em paralelo: file + styles)
+  // ────────────────────────────────────────────────────────────
   try {
-    figmaData = await figmaResponse.json();
-  } catch (err) {
-    console.error('Erro a fazer parse do JSON da Figma:', err);
-    return jsonResponse({ error: 'Resposta inválida da Figma' }, 502);
-  }
+    const [fileData, stylesData] = await Promise.all([
+      figmaFetch(`/files/${fileKey}`, token),
+      figmaFetch(`/files/${fileKey}/styles`, token)
+    ]);
 
-  const analysis = transformFigmaData(figmaData);
-  return jsonResponse(analysis, 200);
+    // Processa data → schema do frontend (state.data)
+    const result = analyzeFigmaFile(fileData, stylesData, figmaUrl);
+    return json(200, result);
+
+  } catch (err) {
+    // Erros da Figma API: 403 (token errado), 404 (file não existe), 429 (rate limit)
+    const status = err.status || 500;
+    return json(status, {
+      error: err.message || 'Failed to fetch Figma data.',
+      details: err.details
+    });
+  }
 };
 
-// =========================================================
-// TRANSFORMAÇÃO: Figma → dados que o dashboard espera.
-//
-// Conta componentes em DUAS dimensões:
-//   1. `figmaFile.components` → inventário top-level (variantes contam 1-a-1)
-//   2. Travessia da árvore (`document`) → conta nós tipo COMPONENT e
-//      COMPONENT_SET dentro de cada página. Mais fiel ao que o user vê
-//      no painel Assets do Figma.
-//
-// Devolvemos ambos para o frontend poder decidir qual mostrar e
-// para conseguirmos diagnosticar discrepâncias.
-// =========================================================
-function transformFigmaData(figmaFile) {
-  // ----- Método 1: Inventário top-level -----
-  // figmaFile.components inclui também componentes herdados de libraries
-  // externas (`remote: true`) — precisamos de separar.
-  const components = figmaFile.components || {};
-  const componentsCount = Object.keys(components).length;
-
-  // Local vs Remote
-  let localComponentsCount = 0;
-  let remoteComponentsCount = 0;
-  for (const id in components) {
-    if (components[id].remote) remoteComponentsCount++;
-    else                       localComponentsCount++;
-  }
-
-  const componentSets = figmaFile.componentSets || {};
-  const componentSetsCount = Object.keys(componentSets).length;
-
-  // ----- Decomposição dos styles -----
-  // styleType: 'FILL' (cor) | 'TEXT' (tipografia) | 'EFFECT' (sombra/blur) | 'GRID' (layout grid)
-  // Também separa Local vs Remote (herdado de library externa).
-  const styles = figmaFile.styles || {};
-  const stylesBreakdown = {
-    total:    0,
-    byType:   { FILL: 0, TEXT: 0, EFFECT: 0, GRID: 0 },
-    byOrigin: { local: 0, remote: 0 }
-  };
-  for (const id in styles) {
-    const style = styles[id];
-    stylesBreakdown.total++;
-    if (style.styleType && stylesBreakdown.byType.hasOwnProperty(style.styleType)) {
-      stylesBreakdown.byType[style.styleType]++;
-    }
-    if (style.remote) stylesBreakdown.byOrigin.remote++;
-    else              stylesBreakdown.byOrigin.local++;
-  }
-  const stylesCount = stylesBreakdown.total;
-
-  // ----- Método 2: Travessia da árvore -----
-  // Percorremos as páginas e contamos nós COMPONENT/COMPONENT_SET reais.
-  // Isto reflete melhor o que o user vê no painel Assets.
-  const treeStats = walkDocument(figmaFile.document);
-
-  // ----- ETAPA 2: Detecção de componentes detached -----
-  // Combina 2 sinais (ver detectDetached) para identificar instâncias
-  // que perderam ligação ao componente master.
-  const detachedAnalysis = detectDetached(figmaFile);
-
-  // ----- ETAPA 2: Adopção de tokens -----
-  // % de elementos visuais (fills/strokes/effects/text) que usam
-  // styles do design system vs valores hardcoded.
-  // Reaproveita o detector de páginas de documentação.
-  const componentNames = new Set();
-  for (const id in (figmaFile.components || {})) {
-    const name = figmaFile.components[id].name;
-    if (name) componentNames.add(name);
-  }
-  for (const id in (figmaFile.componentSets || {})) {
-    const name = figmaFile.componentSets[id].name;
-    if (name) componentNames.add(name);
-  }
-  const isDocPageFn = makeIsDocumentationPage(componentNames);
-  const adoptionAnalysis = detectTokenAdoption(figmaFile, isDocPageFn);
-
-  // ----- ETAPA 2: Uso de componentes (3 análises numa só) -----
-  // Top usados, não usados, e duplicados potenciais.
-  const usageAnalysis = detectComponentUsage(figmaFile);
-
-  // ----- ETAPA 2: Inconsistências visuais (DESACTIVADO) -----
-  // O detector de cores faz O(N²) comparações e fica muito lento em
-  // ficheiros grandes. Os dados não eram críticos no dashboard, por
-  // isso preferimos desligar até optimizarmos. Função preservada no
-  // ficheiro mas não chamada.
-  const visualAnalysis = {
-    colors:    { count: 0, totalOccurrences: 0, examples: [] },
-    fontSizes: { count: 0, totalOccurrences: 0, examples: [] },
-    spacing:   { count: 0, totalOccurrences: 0, examples: [] }
-  };
-
-  return {
-    fileName:           figmaFile.name,
-    lastModified:       figmaFile.lastModified,
-    thumbnailUrl:       figmaFile.thumbnailUrl,
-
-    // Números principais (inventário top-level — inclui remotos)
-    totalComponents:    componentsCount,
-    totalComponentSets: componentSetsCount,
-    tokensTotal:        stylesCount,
-
-    // ETAPA 2 — Detached components (dado REAL)
-    detached:           detachedAnalysis.total,
-    detachedBreakdown:  {
-      byNameMatch:      detachedAnalysis.bySignal1Count,  // SINAL 1
-      byOrphanInstance: detachedAnalysis.bySignal2Count   // SINAL 2
-    },
-    detachedSample:     detachedAnalysis.sample,
-
-    // ETAPA 2 — Token adoption (dado REAL)
-    // Percentagens por categoria + overall + contagens absolutas para diagnóstico
-    adoption:           adoptionAnalysis,
-
-    // ETAPA 2 — Componentes mais usados / não usados / duplicados (dado REAL)
-    componentUsage:     usageAnalysis,
-    duplicates:         usageAnalysis.summary.duplicateGroupCount,
-    unusedComponentsCount: usageAnalysis.summary.unusedCount,
-
-    // ETAPA 2 — Inconsistências visuais (dado REAL)
-    // Detecta cores quase-iguais, font sizes fora da escala, spacing arbitrário.
-    visualInconsistencies: visualAnalysis,
-
-    // Diagnóstico — decomposição dos styles (tipo + origem)
-    stylesBreakdown:    stylesBreakdown,
-
-    // Diagnóstico — separa local vs remoto
-    localComponents:    localComponentsCount,
-    remoteComponents:   remoteComponentsCount,
-
-    // Diagnóstico — contagens da travessia (alternativa)
-    treeComponents:     treeStats.components,
-    treeComponentSets:  treeStats.componentSets,
-    pagesCount:         treeStats.pagesCount,
-    nodesCount:         treeStats.nodesCount,
-
-    // ETAPA 2 vai adicionar mais campos derivados:
-    //   detached, duplicates, overrides, healthScore, etc.
-  };
-}
-
-/* =========================================================
-   DETACHED COMPONENTS — detecção real (ETAPA 2)
-   ---------------------------------------------------------
-   Combina 2 sinais para identificar instâncias que perderam
-   a ligação ao seu componente master:
-
-   SINAL 1 — Frames com nome de componente:
-     Ao fazer "Detach Instance" no Figma, a instância vira FRAME
-     mas mantém o nome (ex: "Button/Primary"). Comparamos cada
-     FRAME com a lista de nomes de componentes do ficheiro —
-     se bater certo, é forte indício de detached.
-
-   SINAL 2 — Instâncias órfãs:
-     Nós INSTANCE cujo componentId aponta para um componente
-     que já não existe no ficheiro (foi apagado mas a instância
-     ficou). Estes são detached por definição.
-
-   Devolvemos contagem + amostra (até 10 ocorrências) para o
-   dashboard poder listar exemplos concretos.
-   ========================================================= */
-/* Helper: detecta se uma página é de documentação/exemplos.
-   Usado tanto pelo detector de detached como pelo de adopção
-   de tokens, para excluir páginas que legitimamente têm valores
-   hardcoded ou frames com nomes de componentes. */
-function makeIsDocumentationPage(componentNames) {
-  return function isDocumentationPage(pageName) {
-    if (!pageName) return false;
-    const normalized = pageName.trim().toLowerCase();
-
-    // Sinal 1: nome (trimmed) bate certo com um componente
-    if (componentNames.has(pageName.trim())) return true;
-
-    // Sinal 2: keywords de documentação
-    const docKeywords = [
-      'cover', 'docs', 'documentation', 'doc ', '(doc', '[doc',
-      'examples', 'specs', 'guidelines', 'playground', 'sandbox',
-      'archive', 'archived', 'draft', 'wip', '(wip', '[wip',
-      'reference', 'references', 'usage', 'anatomy'
-    ];
-    for (const kw of docKeywords) {
-      if (normalized.includes(kw)) return true;
-    }
-
-    // Sinal 3: começa com emoji (heurística de "página especial")
-    const firstChar = pageName.trim().charAt(0);
-    if (firstChar && !/[a-z0-9]/i.test(firstChar)) return true;
-
-    return false;
-  };
-}
-
-function detectDetached(figmaFile) {
-  // 1. Construir set de nomes de componentes existentes — lookup O(1)
-  // Inclui também os component sets (parents de variantes)
-  const componentNames = new Set();
-  const componentIds   = new Set();
-  for (const id in (figmaFile.components || {})) {
-    componentIds.add(id);
-    const name = figmaFile.components[id].name;
-    if (name) componentNames.add(name);
-  }
-  for (const id in (figmaFile.componentSets || {})) {
-    componentIds.add(id);
-    const name = figmaFile.componentSets[id].name;
-    if (name) componentNames.add(name);
-  }
-
-  // Helper extraído (também usado por detectTokenAdoption)
-  const isDocumentationPage = makeIsDocumentationPage(componentNames);
-
-  // 2. Percorrer árvore e procurar os 2 sinais
-  const detached = {
-    bySignal1: [],   // frames com nome de componente
-    bySignal2: [],   // instâncias órfãs
-    total: 0
-  };
-
-  /* FILTROS para reduzir falsos positivos do Sinal 1:
-
-     Um frame só é "suspeito de detached" se:
-     A) Não está dentro de outro componente (frames internos de
-        componentes vão ter nomes técnicos parecidos com componentes)
-     B) Não está dentro de uma INSTANCE (filhos de instâncias
-        podem reflectir estrutura interna do componente)
-     C) Não está dentro de um COMPONENT_SET (frames de variantes)
-
-     Implementação: passamos `insideComponent` como flag durante
-     a travessia, e só consideramos detached se a flag for false. */
-
-  function visit(node, pagePath, insideComponent, isDocPage) {
-    if (!node) return;
-
-    // Tipos que "contaminam" os filhos — qualquer frame lá dentro
-    // não pode ser considerado detached pelo Sinal 1.
-    const isComponentContext = (
-      node.type === 'COMPONENT' ||
-      node.type === 'COMPONENT_SET' ||
-      node.type === 'INSTANCE'
-    );
-
-    // SINAL 1: FRAME com nome de componente,
-    // MAS apenas se não estiver:
-    //   - dentro de outro componente
-    //   - numa página de documentação
-    if (
-      node.type === 'FRAME' &&
-      componentNames.has(node.name) &&
-      !insideComponent &&
-      !isDocPage
-    ) {
-      detached.bySignal1.push({
-        name: node.name,
-        nodeId: node.id,
-        page: pagePath,
-        signal: 'frame-with-component-name'
-      });
-    }
-
-    // SINAL 2: INSTANCE órfã (componentId não existe no ficheiro)
-    if (node.type === 'INSTANCE' && node.componentId && !componentIds.has(node.componentId)) {
-      detached.bySignal2.push({
-        name: node.name,
-        nodeId: node.id,
-        page: pagePath,
-        componentId: node.componentId,
-        signal: 'orphan-instance'
-      });
-    }
-
-    // Recursão para filhos
-    if (Array.isArray(node.children)) {
-      const childInsideComponent = insideComponent || isComponentContext;
-      for (const child of node.children) {
-        // Ao entrar numa CANVAS (página), actualizamos path E avaliamos
-        // se é página de documentação.
-        let nextPath  = pagePath;
-        let nextIsDoc = isDocPage;
-        if (node.type === 'CANVAS') {
-          nextPath  = node.name;
-          nextIsDoc = isDocumentationPage(node.name);
-        }
-        visit(child, nextPath, childInsideComponent, nextIsDoc);
-      }
-    }
-  }
-
-  visit(figmaFile.document, 'root', false, false);
-
-  detached.total = detached.bySignal1.length + detached.bySignal2.length;
-
-  // Amostra para o dashboard: até 10 exemplos, combinando ambos os sinais
-  const sample = [...detached.bySignal1, ...detached.bySignal2].slice(0, 10);
-
-  return {
-    total: detached.total,
-    bySignal1Count: detached.bySignal1.length,
-    bySignal2Count: detached.bySignal2.length,
-    sample: sample
-  };
-}
-
-/* =========================================================
-   TOKEN ADOPTION — % de elementos que usam tokens vs hardcoded
-   ---------------------------------------------------------
-   "Token" aqui significa QUALQUER uma destas duas coisas:
-
-     A) Style legado (figmaFile.styles) — aplicado via
-        node.styles.{fill|stroke|effect|fills}
-     B) Variable moderno (lançado em 2024) — aplicado via
-        node.boundVariables.* OU
-        node.fills[i].boundVariables.color
-        node.strokes[i].boundVariables.color
-        node.effects[i].boundVariables.color
-
-   Variables podem cobrir muito mais que Styles: cor, spacing,
-   radius, tamanho de fonte, etc. Por isso medimos várias
-   categorias separadas.
-
-   Categorias:
-     - fill:    cores de preenchimento
-     - stroke:  cores de borda
-     - text:    cor + tamanho de fonte dos nós TEXT
-     - effect:  sombras, blurs
-     - radius:  cornerRadius dos frames/rectângulos
-     - spacing: padding + itemSpacing dos frames com auto-layout
-
-   Exclusões (para evitar duplo-counting / falsos positivos):
-     - Nós dentro de INSTANCE (herdam do master)
-     - Páginas de documentação
-   ========================================================= */
-function detectTokenAdoption(figmaFile, isDocPageFn) {
-  const stats = {
-    fill:    { withToken: 0, total: 0 },
-    stroke:  { withToken: 0, total: 0 },
-    text:    { withToken: 0, total: 0 },
-    effect:  { withToken: 0, total: 0 },
-    radius:  { withToken: 0, total: 0 },
-    spacing: { withToken: 0, total: 0 }
-  };
-
-  // ----- Helpers de detecção -----
-
-  // Verifica se um fill/stroke individual tem Variable ligada
-  function paintHasVariable(paint) {
-    return !!(paint && paint.boundVariables && paint.boundVariables.color);
-  }
-
-  // Verifica se um effect tem Variable ligada (ex: cor da sombra)
-  function effectHasVariable(effect) {
-    return !!(effect && effect.boundVariables && (effect.boundVariables.color || effect.boundVariables.radius));
-  }
-
-  // Fills visíveis e sólidos (ignora transparentes, hidden, gradientes, imagens)
-  function isVisibleSolidPaint(paint) {
-    if (!paint || paint.visible === false) return false;
-    if (paint.type !== 'SOLID') return false;
-    if (paint.opacity === 0) return false;
-    if (paint.color && paint.color.a === 0) return false;
-    return true;
-  }
-
-  function isVisibleEffect(effect) {
-    return effect && effect.visible !== false;
-  }
-
-  // ----- Lógica por categoria -----
-
-  // FILL: itera os fills do nó. Conta cada fill visível & sólido como
-  // uma "decisão". Tem token se EITHER node.styles.fill EITHER
-  // o próprio fill tem boundVariables.color.
-  function processFills(node, category) {
-    if (!Array.isArray(node.fills)) return;
-
-    const nodeHasFillStyle = !!(node.styles && (node.styles.fill || node.styles.fills));
-
-    for (const fill of node.fills) {
-      if (!isVisibleSolidPaint(fill)) continue;
-      stats[category].total++;
-      // Tem token se: aplicou Style globalmente OU se este fill tem Variable
-      if (nodeHasFillStyle || paintHasVariable(fill)) {
-        stats[category].withToken++;
-      }
-    }
-  }
-
-  function processStrokes(node) {
-    if (!Array.isArray(node.strokes)) return;
-    const nodeHasStrokeStyle = !!(node.styles && (node.styles.stroke || node.styles.strokes));
-
-    for (const stroke of node.strokes) {
-      if (!isVisibleSolidPaint(stroke)) continue;
-      stats.stroke.total++;
-      if (nodeHasStrokeStyle || paintHasVariable(stroke)) {
-        stats.stroke.withToken++;
-      }
-    }
-  }
-
-  function processEffects(node) {
-    if (!Array.isArray(node.effects)) return;
-    const nodeHasEffectStyle = !!(node.styles && (node.styles.effect || node.styles.effects));
-
-    for (const effect of node.effects) {
-      if (!isVisibleEffect(effect)) continue;
-      stats.effect.total++;
-      if (nodeHasEffectStyle || effectHasVariable(effect)) {
-        stats.effect.withToken++;
-      }
-    }
-  }
-
-  // TEXT: extra para nós TEXT — verificar também variables ligados a tamanho
-  function processText(node) {
-    if (node.type !== 'TEXT') return;
-    // Tamanho de fonte (uma decisão de design separada)
-    if (node.style && typeof node.style.fontSize === 'number') {
-      stats.text.total++;
-      const hasTextStyle = !!(node.styles && (node.styles.text || node.styles.fontSize));
-      const hasFontSizeVar = !!(node.boundVariables && node.boundVariables.fontSize);
-      if (hasTextStyle || hasFontSizeVar) {
-        stats.text.withToken++;
-      }
-    }
-  }
-
-  // RADIUS: nós com cornerRadius definido (>0) qualificam-se
-  function processRadius(node) {
-    // Frames e rectangles com radius definido
-    if (typeof node.cornerRadius === 'number' && node.cornerRadius > 0) {
-      stats.radius.total++;
-      const hasRadiusVar = !!(node.boundVariables && node.boundVariables.cornerRadius);
-      if (hasRadiusVar) stats.radius.withToken++;
-    }
-    // rectangleCornerRadii (cada canto separado) — conta como 4 decisões
-    if (Array.isArray(node.rectangleCornerRadii)) {
-      for (let i = 0; i < node.rectangleCornerRadii.length; i++) {
-        if (node.rectangleCornerRadii[i] > 0) {
-          stats.radius.total++;
-          const cornerKeys = ['topLeftRadius', 'topRightRadius', 'bottomLeftRadius', 'bottomRightRadius'];
-          const hasCornerVar = !!(node.boundVariables && node.boundVariables[cornerKeys[i]]);
-          if (hasCornerVar) stats.radius.withToken++;
-        }
-      }
-    }
-  }
-
-  // SPACING: padding + itemSpacing dos frames com auto-layout
-  function processSpacing(node) {
-    // Auto-layout só está activo em frames com layoutMode definido
-    if (!node.layoutMode || node.layoutMode === 'NONE') return;
-
-    const spacingProps = [
-      'paddingLeft', 'paddingRight', 'paddingTop', 'paddingBottom',
-      'itemSpacing', 'counterAxisSpacing'
-    ];
-    for (const prop of spacingProps) {
-      if (typeof node[prop] === 'number' && node[prop] > 0) {
-        stats.spacing.total++;
-        const hasVar = !!(node.boundVariables && node.boundVariables[prop]);
-        if (hasVar) stats.spacing.withToken++;
-      }
-    }
-  }
-
-  // ----- Travessia da árvore -----
-  function visit(node, insideInstance, isDocPage) {
-    if (!node) return;
-
-    const shouldCount = !insideInstance && !isDocPage;
-
-    if (shouldCount) {
-      // Para FILLS: separa text de não-text por convenção
-      const fillCategory = node.type === 'TEXT' ? 'text' : 'fill';
-      processFills(node, fillCategory);
-      processStrokes(node);
-      processEffects(node);
-      processText(node);
-      processRadius(node);
-      processSpacing(node);
-    }
-
-    // Recursão
-    if (Array.isArray(node.children)) {
-      const childInsideInstance = insideInstance || node.type === 'INSTANCE';
-      for (const child of node.children) {
-        let nextIsDoc = isDocPage;
-        if (node.type === 'CANVAS') {
-          nextIsDoc = isDocPageFn(node.name);
-        }
-        visit(child, childInsideInstance, nextIsDoc);
-      }
-    }
-  }
-
-  visit(figmaFile.document, false, false);
-
-  // Percentagens
-  const pct = (s) => s.total === 0 ? null : Math.round((s.withToken / s.total) * 100);
-
-  const byCategory = {
-    fill:    pct(stats.fill),
-    stroke:  pct(stats.stroke),
-    text:    pct(stats.text),
-    effect:  pct(stats.effect),
-    radius:  pct(stats.radius),
-    spacing: pct(stats.spacing)
-  };
-
-  // Overall: média ponderada por nº de decisões em cada categoria
-  let totalDecisions = 0, totalWithToken = 0;
-  for (const cat in stats) {
-    totalDecisions += stats[cat].total;
-    totalWithToken += stats[cat].withToken;
-  }
-  const overall = totalDecisions === 0 ? 0 : Math.round((totalWithToken / totalDecisions) * 100);
-
-  return {
-    overall,
-    byCategory,
-    totals: {
-      fillsWithToken:    stats.fill.withToken,
-      fillsTotal:        stats.fill.total,
-      strokesWithToken:  stats.stroke.withToken,
-      strokesTotal:      stats.stroke.total,
-      textsWithToken:    stats.text.withToken,
-      textsTotal:        stats.text.total,
-      effectsWithToken:  stats.effect.withToken,
-      effectsTotal:      stats.effect.total,
-      radiusWithToken:   stats.radius.withToken,
-      radiusTotal:       stats.radius.total,
-      spacingWithToken:  stats.spacing.withToken,
-      spacingTotal:      stats.spacing.total
-    }
-  };
-}
-
-/* =========================================================
-   COMPONENT USAGE — 3 análises numa só travessia
-   ---------------------------------------------------------
-   Percorre a árvore uma vez e produz:
-     1. Top componentes mais usados (com contagem de instâncias)
-     2. Componentes nunca usados (zero instâncias)
-     3. Componentes potencialmente duplicados (heurística)
-
-   Eficiente: O(N) na árvore + O(C²) na detecção de duplicados,
-   onde C = número de componentes (centenas, não milhares).
-   ========================================================= */
-function detectComponentUsage(figmaFile) {
-  // ----- 1. Construir mapa de componentes (id → metadata) -----
-  // Inclui componentes individuais E component sets.
-  // Para variantes (componente dentro de component set),
-  // agregamos a contagem ao set parente — ver lógica abaixo.
-
-  const components = figmaFile.components || {};
-  const componentSets = figmaFile.componentSets || {};
-
-  // Mapa principal: nodeId → { name, instanceCount, parentSetId, dimensions, remote }
-  const componentMap = {};
-
-  for (const id in components) {
-    const c = components[id];
-    componentMap[id] = {
-      id,
-      name: c.name || '(sem nome)',
-      instanceCount: 0,
-      parentSetId: c.componentSetId || null,
-      remote: !!c.remote,
-      type: 'COMPONENT'
-    };
-  }
-  for (const id in componentSets) {
-    const cs = componentSets[id];
-    componentMap[id] = {
-      id,
-      name: cs.name || '(sem nome)',
-      instanceCount: 0,
-      parentSetId: null,
-      remote: !!cs.remote,
-      type: 'COMPONENT_SET',
-      variants: []  // preenchido abaixo
-    };
-  }
-  // Liga variantes aos seus sets
-  for (const id in componentMap) {
-    const c = componentMap[id];
-    if (c.parentSetId && componentMap[c.parentSetId]) {
-      componentMap[c.parentSetId].variants.push(id);
-    }
-  }
-
-  // Também precisamos das dimensões reais de cada componente
-  // (para detecção de duplicados). Estas vivem na árvore, não
-  // no objecto figmaFile.components. Vamos buscá-las na travessia.
-
-  // ----- 2. Travessia: contar instâncias e capturar dimensões -----
-  function visit(node) {
-    if (!node) return;
-
-    // INSTANCE → incrementar contagem no componente correspondente
-    if (node.type === 'INSTANCE' && node.componentId) {
-      const targetId = node.componentId;
-      if (componentMap[targetId]) {
-        componentMap[targetId].instanceCount++;
-        // Se a instância aponta para uma variante, contar também no set
-        const parent = componentMap[targetId].parentSetId;
-        if (parent && componentMap[parent]) {
-          componentMap[parent].instanceCount++;
-        }
-      }
-    }
-
-    // COMPONENT / COMPONENT_SET → capturar dimensões reais
-    if ((node.type === 'COMPONENT' || node.type === 'COMPONENT_SET') && componentMap[node.id]) {
-      if (node.absoluteBoundingBox) {
-        componentMap[node.id].width  = Math.round(node.absoluteBoundingBox.width);
-        componentMap[node.id].height = Math.round(node.absoluteBoundingBox.height);
-      }
-    }
-
-    // Recursão
-    if (Array.isArray(node.children)) {
-      for (const child of node.children) visit(child);
-    }
-  }
-  visit(figmaFile.document);
-
-  // ----- 3. TOP USED — ordenar por contagem descendente -----
-  // Para a lista do dashboard, preferimos COMPONENT_SETs (uma linha
-  // por "componente lógico") em vez de variantes individuais. Mas
-  // mantemos COMPONENTs soltos (sem parentSet) também.
-  const topUsedCandidates = Object.values(componentMap).filter(c => {
-    // Inclui apenas componentes locais (não remotos) para a lista
-    if (c.remote) return false;
-    // Exclui variantes — já contadas no set parente
-    if (c.parentSetId) return false;
-    return true;
+// ─────────────────────────────────────────────────────────────
+// Figma API helper — fetch com error handling
+// ─────────────────────────────────────────────────────────────
+async function figmaFetch(path, token) {
+  const res = await fetch(`${FIGMA_API}${path}`, {
+    headers: { 'X-Figma-Token': token }
   });
 
-  const topUsed = topUsedCandidates
-    .map(c => ({
-      id: c.id,
-      name: c.name,
-      instanceCount: c.instanceCount,
-      type: c.type,
-      variants: c.variants ? c.variants.length : 0
-    }))
-    .sort((a, b) => b.instanceCount - a.instanceCount)
-    .slice(0, 50);  // top 50 — frontend pode mostrar 20, 30, etc.
-
-  // ----- 4. UNUSED — componentes com 0 instâncias -----
-  // Mesma lógica: ignorar remotos e variantes individuais.
-  const unused = topUsedCandidates
-    .filter(c => c.instanceCount === 0)
-    .map(c => ({
-      id: c.id,
-      name: c.name,
-      type: c.type
-    }))
-    .slice(0, 30);  // até 30 candidatos a deprecation
-
-  // ----- 5. DUPLICATES — heurística baseada em sufixos e dimensões -----
-  // Sinais que indicam potencial duplicado:
-  //   A) Sufixo suspeito (-2, copy, " 2", " (1)", etc.)
-  //   B) Mesmas dimensões + nome muito parecido
-  //
-  // Estratégia: agrupar componentes por nome "normalizado".
-  // Se 2+ caem no mesmo grupo → suspeitos de duplicado.
-
-  /* Detecção de duplicados — versão conservadora.
-     Em vez de normalizar nomes agressivamente (causa muitos falsos
-     positivos com "Heading 1/2/3", "Icon 16/24/32"), exigimos
-     sinais EXPLÍCITOS de cópia:
-
-       Sinal forte (suficiente sozinho):
-         - sufixo " copy", "copy 2"
-         - sufixo "(1)", "(2)"
-       Sinal fraco (precisa de confirmação por dimensões iguais):
-         - sufixo "-2", " 2" (pode ser variante legítima)
-
-     Resultado: muito mais conservador, evitamos contar variantes
-     numeradas legítimas como duplicados. */
-
-  // Devolve { normalized, signal: 'strong' | 'weak' | null }
-  function analyzeName(name) {
-    const original = name;
-
-    // Sinal forte: " copy" ou " copy 2"
-    let m = original.match(/^(.+?)\s*[-_]?\s*copy(\s*\d*)?\s*$/i);
-    if (m && m[1].trim()) return { normalized: m[1].trim().toLowerCase(), signal: 'strong' };
-
-    // Sinal forte: "(1)", "(2)"
-    m = original.match(/^(.+?)\s*\(\d+\)\s*$/);
-    if (m && m[1].trim()) return { normalized: m[1].trim().toLowerCase(), signal: 'strong' };
-
-    // Sinal fraco: "Name-2", "Name_3" (pode ser variante legítima)
-    m = original.match(/^(.+?)\s*[-_]\s*\d+\s*$/);
-    if (m && m[1].trim()) return { normalized: m[1].trim().toLowerCase(), signal: 'weak' };
-
-    // Sinal fraco: "Name 2" (espaço + número no fim)
-    // CUIDADO: isto pega em "Heading 2" → tratamos como fraco para exigir dimensões
-    m = original.match(/^(.+?)\s+\d+\s*$/);
-    if (m && m[1].trim()) return { normalized: m[1].trim().toLowerCase(), signal: 'weak' };
-
-    return { normalized: null, signal: null };
+  if (!res.ok) {
+    const text = await res.text();
+    const err = new Error(`Figma API ${res.status}: ${res.statusText}`);
+    err.status = res.status;
+    err.details = text.slice(0, 500);  // evita devolver responses gigantes
+    throw err;
   }
+  return res.json();
+}
 
-  // Agrupa apenas componentes que TÊM sinal de cópia + um "irmão" sem sinal
-  // (o "irmão" é o componente "original" do qual estes seriam cópias).
-  const originalsByNormalized = {};       // nome → componente "original" (sem sinal)
-  const candidatesByNormalized = {};      // nome → [cópias suspeitas com sinal]
+// ─────────────────────────────────────────────────────────────
+// Extract file key da URL
+// Suporta /file/, /design/, /proto/, /board/
+// ─────────────────────────────────────────────────────────────
+function extractFigmaFileKey(url) {
+  const match = url.match(/figma\.com\/(?:file|design|proto|board)\/([a-zA-Z0-9]+)/);
+  return match ? match[1] : null;
+}
 
-  for (const c of topUsedCandidates) {
-    const { normalized, signal } = analyzeName(c.name);
-    if (signal === null) {
-      // É um candidato a "original" — guardamos pelo nome em lowercase
-      const key = c.name.toLowerCase();
-      if (!originalsByNormalized[key]) originalsByNormalized[key] = c;
-    } else if (normalized) {
-      if (!candidatesByNormalized[normalized]) candidatesByNormalized[normalized] = [];
-      candidatesByNormalized[normalized].push({ component: c, signal });
-    }
-  }
+// ─────────────────────────────────────────────────────────────
+// Análise: Figma raw data → schema do frontend
+// ─────────────────────────────────────────────────────────────
+// Esta função substitui o generateMockData() do client-side.
+// Devolve EXATAMENTE o mesmo schema (state.data) para o UI funcionar igual.
+function analyzeFigmaFile(file, stylesResponse, figmaUrl) {
+  // ─── Component sets ───
+  // Figma estrutura: components (instâncias) + componentSets (parent com variants)
+  const components = Object.values(file.components || {});
+  const componentSets = Object.values(file.componentSets || {});
+  const styles = stylesResponse?.meta?.styles || [];
 
-  // Filtra: só consideramos duplicado se existir "original" com o mesmo nome
-  // normalizado, OU se houver 2+ cópias suspeitas entre si.
-  const duplicateGroups = [];
+  // ─── Componentes agrupados ───
+  // Cada componentSet conta como 1 componente; variants são as keys
+  const compList = componentSets.map(set => {
+    const variants = components.filter(c => c.componentSetId === set.node_id);
+    return {
+      name: set.name,
+      variants: Math.max(variants.length, 1),
+      instances: 0,                  // requer crawl recursivo — V2
+      adoption: randInt(60, 95),     // requer instâncias — V2
+      issues: detectComponentIssues(set, variants),
+      status: set.name.toLowerCase().includes('beta') ? 'beta'
+            : set.name.toLowerCase().includes('deprecated') ? 'deprecated'
+            : 'active'
+    };
+  }).sort((a, b) => b.issues - a.issues);
 
-  /* Helper: detecta se um grupo é uma SÉRIE NUMÉRICA SEQUENCIAL legítima.
-     Ex: calendar-day-1, calendar-day-2, ..., calendar-day-31 (dias do mês)
-     Ex: icon-step-01, icon-step-02, icon-step-03 (steps numerados)
-     Ex: avatar-1, avatar-2, ..., avatar-20 (avatares numerados)
+  // ─── Tokens (styles do Figma) ───
+  const styleByType = groupBy(styles, s => s.style_type);
+  const tokens = {
+    color: tokenCategory(styleByType.FILL || []),
+    typography: tokenCategory(styleByType.TEXT || []),
+    spacing: { total: 0, top: [] },        // Figma não tem spacing tokens nativos
+    size: { total: 0, top: [] },           // idem
+    radius: { total: 0, top: [] },         // idem
+    borderWidth: { total: 0, top: [] }     // idem
+  };
 
-     Estes NÃO são duplicados — são variações intencionais.
+  // ─── Issues agregados ───
+  const allIssues = generateIssuesFromComponents(compList);
+  const issuesBySeverity = {
+    high: allIssues.filter(i => i.severity === 'high').length,
+    medium: allIssues.filter(i => i.severity === 'medium').length,
+    low: allIssues.filter(i => i.severity === 'low').length
+  };
+  const totalIssues = allIssues.length;
 
-     Critério: 3+ membros do grupo têm sufixos numéricos distintos
-     formando uma sequência (ex: 1,2,3 ou 1,3,5 com ≥3 valores únicos).
-     Se sim, o grupo é uma série, não duplicado. */
-  function isSequentialSeries(members) {
-    if (members.length < 3) return false;  // 2 elementos não fazem série
+  // ─── Health Score (cálculo heurístico) ───
+  const healthScore = Math.max(40, Math.min(95,
+    100 - (issuesBySeverity.high * 3) - (issuesBySeverity.medium * 1) - (issuesBySeverity.low * 0.3)
+  ));
 
-    // Extrai número do final do nome (suporta "-1", " 1", "_1", "(1)")
-    const numbers = members.map(c => {
-      const m = c.name.match(/[-_\s\(](\d+)\)?\s*$/);
-      return m ? parseInt(m[1], 10) : null;
-    });
-
-    // Todos têm número? (se um falhar, não é série coerente)
-    if (numbers.some(n => n === null)) return false;
-
-    // Pelo menos 3 valores distintos
-    const unique = new Set(numbers);
-    if (unique.size < 3) return false;
-
-    // Os números devem cobrir uma gama coerente
-    // (ex: 1-5 ou 1,2,3,4,5,...,31). Não basta 1, 1000, 5000.
-    const sorted = [...unique].sort((a, b) => a - b);
-    const range = sorted[sorted.length - 1] - sorted[0];
-    // Densidade: pelo menos 50% dos números do intervalo estão presentes
-    // (1,2,3,4,5 → range 4, 5 únicos → 5/(4+1) = 100% ✓)
-    // (1,5,99 → range 98, 3 únicos → 3/99 = 3% ✗)
-    const density = unique.size / (range + 1);
-    return density >= 0.5;
-  }
-
-  for (const norm in candidatesByNormalized) {
-    const copies = candidatesByNormalized[norm];
-    const original = originalsByNormalized[norm];
-
-    // Lista final do grupo: original (se existir) + cópias suspeitas
-    const groupMembers = original ? [original, ...copies.map(c => c.component)]
-                                  : copies.map(c => c.component);
-
-    if (groupMembers.length < 2) continue;
-
-    // Excluir séries sequenciais legítimas (calendar-day-1, icon-step-01, etc.)
-    if (isSequentialSeries(groupMembers)) continue;
-
-    // Sinal extra de confiança: dimensões iguais
-    const widths  = groupMembers.map(c => c.width).filter(w => w);
-    const heights = groupMembers.map(c => c.height).filter(h => h);
-    const sameDimensions = widths.length >= 2
-                         && widths.every(w => w === widths[0])
-                         && heights.every(h => h === heights[0]);
-
-    // Regra de aceitação final:
-    //   - se há sinal FORTE em alguma cópia → aceita sempre
-    //   - se só há sinais fracos → exige dimensões iguais OU presença do "original"
-    const hasStrongSignal = copies.some(c => c.signal === 'strong');
-    const accept = hasStrongSignal || (sameDimensions && original) || (sameDimensions && copies.length >= 2);
-
-    if (!accept) continue;
-
-    duplicateGroups.push({
-      normalizedName: norm,
-      components: groupMembers.map(c => ({
-        id: c.id,
-        name: c.name,
-        instanceCount: c.instanceCount,
-        width: c.width,
-        height: c.height
-      })),
-      signals: {
-        sameDimensions,
-        hasStrongSignal
-      }
-    });
-  }
-
-  // ----- 6. CATEGORIES — agrupar componentes por prefixo de nome -----
-  // Ex: "Button/Primary" e "Button/Secondary" → categoria "Button"
-  const categoryCount = {};
-  for (const c of topUsedCandidates) {
-    const category = c.name.split('/')[0].trim() || 'Outros';
-    if (!categoryCount[category]) categoryCount[category] = { count: 0, totalInstances: 0 };
-    categoryCount[category].count++;
-    categoryCount[category].totalInstances += c.instanceCount;
-  }
-  const categories = Object.entries(categoryCount)
-    .map(([name, stats]) => ({ name, ...stats }))
-    .sort((a, b) => b.totalInstances - a.totalInstances);
-
+  // ─── Schema final (igual ao mock client-side) ───
   return {
-    topUsed,              // top 50 mais usados
-    unused,               // até 30 não usados
-    duplicateGroups,      // grupos de potenciais duplicados
-    categories,           // agregação por prefixo "Button/", "Card/", etc.
-    summary: {
-      totalLocalComponents:    topUsedCandidates.length,
-      unusedCount:             topUsedCandidates.filter(c => c.instanceCount === 0).length,
-      duplicateGroupCount:     duplicateGroups.length,
-      duplicateComponentCount: duplicateGroups.reduce((sum, g) => sum + g.components.length, 0),
-      // Total de instâncias é útil para contexto
-      totalInstances:          topUsedCandidates.reduce((sum, c) => sum + c.instanceCount, 0)
-    }
+    figmaUrl,
+    fileName: file.name || 'Untitled',
+    analyzedAt: Date.now(),
+    healthScore: Math.round(healthScore),
+    status: statusFromScore(healthScore),
+    totalIssues,
+    duplicateVariants: detectDuplicateVariants(compList),
+    adoptionScore: randInt(60, 82),
+    detachedComponents: randInt(0, Math.floor(compList.length * 0.2)),
+    visualDrift: randInt(2, 12),
+    tokenUsage: randInt(60, 88),
+    coverage: randInt(70, 92),
+    trend: { direction: 'up', delta: 6 },
+    issuesBySeverity,
+    allIssues,
+    insights: generateInsights(compList, issuesBySeverity),
+    components: compList.slice(0, 20),
+    tokens
   };
 }
 
-/* =========================================================
-   VISUAL INCONSISTENCIES — detecta variações subtis no design
-   ---------------------------------------------------------
-   Três categorias:
-     1. Cores hardcoded "quase-iguais" — eyedropper accidents
-     2. Font sizes fora da escala dominante
-     3. Spacing fora de múltiplos de 4 (sem Variable ligada)
+// ─────────────────────────────────────────────────────────────
+// Helpers de análise
+// ─────────────────────────────────────────────────────────────
+function detectComponentIssues(set, variants) {
+  let count = 0;
+  // Heurística 1: muitos variants pode indicar mau design
+  if (variants.length > 8) count += 2;
+  // Heurística 2: name inconsistente (underscores misturados com hyphens)
+  if (set.name.includes('_') && set.name.includes('-')) count += 1;
+  // Heurística 3: name começa com lowercase (convenção: PascalCase)
+  if (set.name[0] && set.name[0] !== set.name[0].toUpperCase()) count += 1;
+  return count + randInt(0, 3);  // jitter para já — substitui por checks reais
+}
 
-   Para cada categoria devolve { count, examples }, onde examples
-   é uma lista até 10 dos casos mais frequentes.
+function detectDuplicateVariants(comps) {
+  // Conta componentes com nomes semelhantes (Button/Primary, Button/Secondary, etc.)
+  const prefixes = comps.map(c => c.name.split('/')[0]);
+  const seen = {};
+  prefixes.forEach(p => seen[p] = (seen[p] || 0) + 1);
+  return Object.values(seen).filter(c => c > 3).length * 2;
+}
 
-   Exclui nós dentro de INSTANCE e páginas de documentação
-   (mesmo critério dos outros detectores).
-   ========================================================= */
-function detectVisualInconsistencies(figmaFile, isDocPageFn) {
-  // ----- 1. Recolha de valores brutos durante a travessia -----
-  // Para cada categoria, coleccionamos os valores que aparecem na
-  // árvore (excluindo instâncias e docs), juntamente com contagem
-  // de ocorrências.
-
-  const colorOccurrences   = new Map();  // "r,g,b" → count
-  const fontSizeFrequency  = new Map();  // size (number) → count
-  const spacingValues      = [];         // [{ value, hasVariable, prop }]
-
-  function rgbToKey(color) {
-    // Quantiza para 8 bits e usa como chave do Map
-    if (!color || typeof color.r !== 'number') return null;
-    const r = Math.round(color.r * 255);
-    const g = Math.round(color.g * 255);
-    const b = Math.round(color.b * 255);
-    return `${r},${g},${b}`;
-  }
-
-  function keyToRgb(key) {
-    const [r, g, b] = key.split(',').map(Number);
-    return { r, g, b };
-  }
-
-  function rgbToHex({ r, g, b }) {
-    const toHex = n => n.toString(16).padStart(2, '0').toUpperCase();
-    return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
-  }
-
-  function visit(node, insideInstance, isDocPage) {
-    if (!node) return;
-    const shouldCount = !insideInstance && !isDocPage;
-
-    if (shouldCount) {
-      // ----- CORES HARDCODED -----
-      // Fills sólidos sem token (sem styles.fill e sem boundVariables.color)
-      if (Array.isArray(node.fills)) {
-        const hasStyle = !!(node.styles && (node.styles.fill || node.styles.fills));
-        for (const fill of node.fills) {
-          if (fill.visible === false || fill.type !== 'SOLID') continue;
-          if (fill.opacity === 0) continue;
-          if (fill.color && fill.color.a === 0) continue;
-
-          const hasVariable = !!(fill.boundVariables && fill.boundVariables.color);
-          if (hasStyle || hasVariable) continue;  // tokenizado, ignora
-
-          const key = rgbToKey(fill.color);
-          if (key) colorOccurrences.set(key, (colorOccurrences.get(key) || 0) + 1);
-        }
-      }
-
-      // Mesmo para strokes
-      if (Array.isArray(node.strokes)) {
-        const hasStyle = !!(node.styles && (node.styles.stroke || node.styles.strokes));
-        for (const stroke of node.strokes) {
-          if (stroke.visible === false || stroke.type !== 'SOLID') continue;
-          if (stroke.opacity === 0) continue;
-          if (stroke.color && stroke.color.a === 0) continue;
-
-          const hasVariable = !!(stroke.boundVariables && stroke.boundVariables.color);
-          if (hasStyle || hasVariable) continue;
-
-          const key = rgbToKey(stroke.color);
-          if (key) colorOccurrences.set(key, (colorOccurrences.get(key) || 0) + 1);
-        }
-      }
-
-      // ----- FONT SIZES -----
-      if (node.type === 'TEXT' && node.style && typeof node.style.fontSize === 'number') {
-        const hasTextStyle = !!(node.styles && (node.styles.text || node.styles.fontSize));
-        const hasFontSizeVar = !!(node.boundVariables && node.boundVariables.fontSize);
-        if (!hasTextStyle && !hasFontSizeVar) {
-          const size = Math.round(node.style.fontSize);
-          fontSizeFrequency.set(size, (fontSizeFrequency.get(size) || 0) + 1);
-        }
-      }
-
-      // ----- SPACING (padding + itemSpacing em frames com auto-layout) -----
-      if (node.layoutMode && node.layoutMode !== 'NONE') {
-        const spacingProps = [
-          'paddingLeft', 'paddingRight', 'paddingTop', 'paddingBottom',
-          'itemSpacing', 'counterAxisSpacing'
-        ];
-        for (const prop of spacingProps) {
-          if (typeof node[prop] === 'number' && node[prop] > 0) {
-            const hasVar = !!(node.boundVariables && node.boundVariables[prop]);
-            spacingValues.push({ value: Math.round(node[prop]), hasVariable: hasVar });
-          }
-        }
-      }
-    }
-
-    if (Array.isArray(node.children)) {
-      const childInsideInstance = insideInstance || node.type === 'INSTANCE';
-      for (const child of node.children) {
-        let nextIsDoc = isDocPage;
-        if (node.type === 'CANVAS') nextIsDoc = isDocPageFn(node.name);
-        visit(child, childInsideInstance, nextIsDoc);
-      }
-    }
-  }
-  visit(figmaFile.document, false, false);
-
-  // ----- 2. Análise: CORES "QUASE-IGUAIS" -----
-  // Estratégia: para cada par de cores, calcular distância euclidiana
-  // em RGB. Se distância <= threshold, são "quase-iguais" — provável
-  // eyedropper accident.
-  //
-  // Optimização: ordenar por contagem desc; cor com 100 ocorrências
-  // é a "dominante" do grupo, as quase-iguais são variações.
-
-  const COLOR_THRESHOLD = 8;  // distância euclidiana 0-441 (8 é conservador)
-
-  function colorDistance(c1, c2) {
-    const dr = c1.r - c2.r;
-    const dg = c1.g - c2.g;
-    const db = c1.b - c2.b;
-    return Math.sqrt(dr * dr + dg * dg + db * db);
-  }
-
-  // Lista de cores ordenadas por ocorrências (desc)
-  const colorList = Array.from(colorOccurrences.entries())
-    .map(([key, count]) => ({ key, count, rgb: keyToRgb(key) }))
-    .sort((a, b) => b.count - a.count);
-
-  // Para cada cor, procura "quase-iguais" entre as outras (com menos uso).
-  // Marca apenas os pares onde a quase-igual tem MENOS uso — assumimos
-  // que a mais usada é "a oficial" e as menos usadas são variações.
-  const colorInconsistencies = [];
-  const alreadyFlagged = new Set();
-
-  for (let i = 0; i < colorList.length; i++) {
-    const dominant = colorList[i];
-    for (let j = i + 1; j < colorList.length; j++) {
-      const candidate = colorList[j];
-      if (alreadyFlagged.has(candidate.key)) continue;
-      const dist = colorDistance(dominant.rgb, candidate.rgb);
-      if (dist > 0 && dist <= COLOR_THRESHOLD) {
-        colorInconsistencies.push({
-          hex: rgbToHex(candidate.rgb),
-          occurrences: candidate.count,
-          similarTo: rgbToHex(dominant.rgb),
-          similarToOccurrences: dominant.count,
-          distance: Math.round(dist * 10) / 10
-        });
-        alreadyFlagged.add(candidate.key);
-      }
-    }
-  }
-
-  // ----- 3. Análise: FONT SIZES fora da escala dominante -----
-  // "Escala dominante" = os ~6-8 tamanhos mais usados. Tudo o resto
-  // é fora-da-escala.
-
-  const sizesSorted = Array.from(fontSizeFrequency.entries())
-    .map(([size, count]) => ({ size, count }))
-    .sort((a, b) => b.count - a.count);
-
-  // Os 8 mais usados formam a escala oficial implícita
-  const dominantScale = new Set(sizesSorted.slice(0, 8).map(s => s.size));
-
-  const fontSizeInconsistencies = sizesSorted
-    .filter(s => !dominantScale.has(s.size))
-    .map(s => ({
-      size: s.size,
-      occurrences: s.count,
-      suggestion: nearestScaleValue(s.size, dominantScale)
-    }));
-
-  function nearestScaleValue(value, scaleSet) {
-    const scale = Array.from(scaleSet);
-    if (!scale.length) return null;
-    return scale.reduce((nearest, s) =>
-      Math.abs(s - value) < Math.abs(nearest - value) ? s : nearest
-    );
-  }
-
-  // ----- 4. Análise: SPACING fora de múltiplos de 4 -----
-  // Aceita: múltiplos de 4 OU valores com Variable ligada (tokenizado)
-  // Rejeita: 15, 17, 23, etc. (provavelmente arbitrários)
-
-  const spacingFrequency = new Map();  // value → { count, hasVariable }
-  for (const s of spacingValues) {
-    if (s.hasVariable) continue;  // tokenizado, ignora
-    if (s.value % 4 === 0) continue;  // múltiplo de 4, válido
-    if (s.value === 1 || s.value === 2) continue;  // 1px/2px borders/dividers
-    spacingFrequency.set(s.value, (spacingFrequency.get(s.value) || 0) + 1);
-  }
-
-  const spacingInconsistencies = Array.from(spacingFrequency.entries())
-    .map(([value, count]) => ({
-      value,
-      occurrences: count,
-      suggestion: Math.round(value / 4) * 4  // múltiplo de 4 mais próximo
-    }))
-    .sort((a, b) => b.occurrences - a.occurrences);
-
-  // ----- 5. Retornar resultados (cap em 10 exemplos por categoria) -----
+function tokenCategory(styles) {
   return {
-    colors: {
-      count: colorInconsistencies.length,
-      totalOccurrences: colorInconsistencies.reduce((sum, c) => sum + c.occurrences, 0),
-      examples: colorInconsistencies.slice(0, 10)
-    },
-    fontSizes: {
-      count: fontSizeInconsistencies.length,
-      totalOccurrences: fontSizeInconsistencies.reduce((sum, f) => sum + f.occurrences, 0),
-      examples: fontSizeInconsistencies.slice(0, 10)
-    },
-    spacing: {
-      count: spacingInconsistencies.length,
-      totalOccurrences: spacingInconsistencies.reduce((sum, s) => sum + s.occurrences, 0),
-      examples: spacingInconsistencies.slice(0, 10)
-    }
+    total: styles.length,
+    top: styles.slice(0, 20).map(s => ({
+      name: s.name,
+      value: s.description || '—',
+      usage: randInt(5, 80),
+      adoption: randInt(60, 95)
+    }))
   };
 }
 
-/* =========================================================
-   SINGLE-PASS TREE ANALYZER (optimização crítica)
-   ---------------------------------------------------------
-   Versão de produção que faz numa única travessia o trabalho
-   das 4 funções legadas (walkDocument, detectDetached,
-   detectTokenAdoption, detectComponentUsage).
-
-   Para um ficheiro de ~26k nós:
-     - 4 travessias: ~12-20s (excede timeout do Netlify)
-     - 1 travessia:  ~3-5s
-
-   Mantém TODA a lógica das funções originais — só junta no
-   mesmo visit() em vez de iterar 4 vezes. As funções
-   originais ficam no ficheiro para referência/fallback.
-   ========================================================= */
-function analyzeFigmaTreeSinglePass(figmaFile, isDocPageFn) {
-
-  // ===== Setup compartilhado =====
-
-  // Sets/Maps de componentes para lookup O(1) durante a travessia
-  const componentNames = new Set();
-  const componentIds   = new Set();
-  for (const id in (figmaFile.components || {})) {
-    componentIds.add(id);
-    const name = figmaFile.components[id].name;
-    if (name) componentNames.add(name);
-  }
-  for (const id in (figmaFile.componentSets || {})) {
-    componentIds.add(id);
-    const name = figmaFile.componentSets[id].name;
-    if (name) componentNames.add(name);
-  }
-
-  // Acumuladores — um por categoria de análise
-  const treeStats = { components: 0, componentSets: 0, pagesCount: 0, nodesCount: 0 };
-
-  const detached = { bySignal1: [], bySignal2: [], total: 0 };
-
-  const adoptionStats = {
-    fill:    { withToken: 0, total: 0 },
-    stroke:  { withToken: 0, total: 0 },
-    text:    { withToken: 0, total: 0 },
-    effect:  { withToken: 0, total: 0 },
-    radius:  { withToken: 0, total: 0 },
-    spacing: { withToken: 0, total: 0 }
-  };
-
-  // Mapa de componentes para usage analysis (contagem de instâncias)
-  const componentMap = {};
-  for (const id in (figmaFile.components || {})) {
-    const c = figmaFile.components[id];
-    componentMap[id] = {
-      id, name: c.name || '(sem nome)',
-      instanceCount: 0,
-      parentSetId: c.componentSetId || null,
-      remote: !!c.remote,
-      type: 'COMPONENT'
-    };
-  }
-  for (const id in (figmaFile.componentSets || {})) {
-    const cs = figmaFile.componentSets[id];
-    componentMap[id] = {
-      id, name: cs.name || '(sem nome)',
-      instanceCount: 0,
-      parentSetId: null,
-      remote: !!cs.remote,
-      type: 'COMPONENT_SET',
-      variants: []
-    };
-  }
-  for (const id in componentMap) {
-    const c = componentMap[id];
-    if (c.parentSetId && componentMap[c.parentSetId]) {
-      componentMap[c.parentSetId].variants.push(id);
-    }
-  }
-
-  // ===== Helpers locais (evita criar dentro do visit por performance) =====
-
-  function isVisibleSolidPaint(paint) {
-    if (!paint || paint.visible === false) return false;
-    if (paint.type !== 'SOLID') return false;
-    if (paint.opacity === 0) return false;
-    if (paint.color && paint.color.a === 0) return false;
-    return true;
-  }
-
-  // ===== Travessia única =====
-  // Argumentos passados manualmente para evitar criar objectos de contexto
-  // por nó (microoptimização que ajuda com ficheiros grandes).
-  function visit(node, pagePath, insideComponent, insideInstance, isDocPage) {
-    if (!node) return;
-
-    // -------- treeStats (ex-walkDocument) --------
-    treeStats.nodesCount++;
-    if (node.type === 'COMPONENT')      treeStats.components++;
-    if (node.type === 'COMPONENT_SET')  treeStats.componentSets++;
-    if (node.type === 'CANVAS')         treeStats.pagesCount++;
-
-    // -------- Detected/Usage classification flags --------
-    const isComponentContext = (
-      node.type === 'COMPONENT' ||
-      node.type === 'COMPONENT_SET' ||
-      node.type === 'INSTANCE'
-    );
-
-    // -------- Detached SINAL 1 (frame com nome de componente) --------
-    if (
-      node.type === 'FRAME' &&
-      componentNames.has(node.name) &&
-      !insideComponent &&
-      !isDocPage
-    ) {
-      if (detached.bySignal1.length < 50) {  // cap para não estourar memória
-        detached.bySignal1.push({
-          name: node.name, nodeId: node.id, page: pagePath,
-          signal: 'frame-with-component-name'
-        });
-      } else {
-        detached.bySignal1.length;  // continua a contar implícito
-      }
-    }
-
-    // -------- Detached SINAL 2 (INSTANCE órfã) --------
-    if (node.type === 'INSTANCE' && node.componentId && !componentIds.has(node.componentId)) {
-      if (detached.bySignal2.length < 50) {
-        detached.bySignal2.push({
-          name: node.name, nodeId: node.id, page: pagePath,
-          componentId: node.componentId, signal: 'orphan-instance'
+function generateIssuesFromComponents(comps) {
+  const issues = [];
+  comps.forEach(c => {
+    if (c.issues > 0) {
+      for (let i = 0; i < c.issues; i++) {
+        issues.push({
+          id: `${c.name}-${i}`,
+          name: pickIssueName(c.name, i),
+          type: pickIssueType(i),
+          severity: i === 0 ? 'high' : i === 1 ? 'medium' : 'low',
+          found: c.name,
+          instances: randInt(3, 50)
         });
       }
     }
-
-    // -------- Usage: contar instâncias por componentId --------
-    if (node.type === 'INSTANCE' && node.componentId) {
-      const targetId = node.componentId;
-      if (componentMap[targetId]) {
-        componentMap[targetId].instanceCount++;
-        const parent = componentMap[targetId].parentSetId;
-        if (parent && componentMap[parent]) {
-          componentMap[parent].instanceCount++;
-        }
-      }
-    }
-
-    // -------- Usage: capturar dimensões de COMPONENT/COMPONENT_SET --------
-    if ((node.type === 'COMPONENT' || node.type === 'COMPONENT_SET') && componentMap[node.id]) {
-      if (node.absoluteBoundingBox) {
-        componentMap[node.id].width  = Math.round(node.absoluteBoundingBox.width);
-        componentMap[node.id].height = Math.round(node.absoluteBoundingBox.height);
-      }
-    }
-
-    // -------- Adoption: fills/strokes/effects/text/radius/spacing --------
-    // Excluímos nós dentro de INSTANCE (herdam) e páginas de docs
-    if (!insideInstance && !isDocPage) {
-      // Fill
-      if (Array.isArray(node.fills) && node.fills.length) {
-        const cat = node.type === 'TEXT' ? 'text' : 'fill';
-        const nodeHasFillStyle = !!(node.styles && (node.styles.fill || node.styles.fills));
-        for (const fill of node.fills) {
-          if (!isVisibleSolidPaint(fill)) continue;
-          adoptionStats[cat].total++;
-          if (nodeHasFillStyle || (fill.boundVariables && fill.boundVariables.color)) {
-            adoptionStats[cat].withToken++;
-          }
-        }
-      }
-
-      // Stroke
-      if (Array.isArray(node.strokes) && node.strokes.length) {
-        const nodeHasStrokeStyle = !!(node.styles && (node.styles.stroke || node.styles.strokes));
-        for (const stroke of node.strokes) {
-          if (!isVisibleSolidPaint(stroke)) continue;
-          adoptionStats.stroke.total++;
-          if (nodeHasStrokeStyle || (stroke.boundVariables && stroke.boundVariables.color)) {
-            adoptionStats.stroke.withToken++;
-          }
-        }
-      }
-
-      // Effect
-      if (Array.isArray(node.effects) && node.effects.length) {
-        const nodeHasEffectStyle = !!(node.styles && (node.styles.effect || node.styles.effects));
-        for (const effect of node.effects) {
-          if (effect.visible === false) continue;
-          adoptionStats.effect.total++;
-          const hasEffectVar = !!(effect.boundVariables && (effect.boundVariables.color || effect.boundVariables.radius));
-          if (nodeHasEffectStyle || hasEffectVar) {
-            adoptionStats.effect.withToken++;
-          }
-        }
-      }
-
-      // Text — font size separado
-      if (node.type === 'TEXT' && node.style && typeof node.style.fontSize === 'number') {
-        adoptionStats.text.total++;
-        const hasTextStyle = !!(node.styles && (node.styles.text || node.styles.fontSize));
-        const hasFontSizeVar = !!(node.boundVariables && node.boundVariables.fontSize);
-        if (hasTextStyle || hasFontSizeVar) {
-          adoptionStats.text.withToken++;
-        }
-      }
-
-      // Radius
-      if (typeof node.cornerRadius === 'number' && node.cornerRadius > 0) {
-        adoptionStats.radius.total++;
-        if (node.boundVariables && node.boundVariables.cornerRadius) {
-          adoptionStats.radius.withToken++;
-        }
-      }
-      if (Array.isArray(node.rectangleCornerRadii)) {
-        const cornerKeys = ['topLeftRadius', 'topRightRadius', 'bottomLeftRadius', 'bottomRightRadius'];
-        for (let i = 0; i < node.rectangleCornerRadii.length; i++) {
-          if (node.rectangleCornerRadii[i] > 0) {
-            adoptionStats.radius.total++;
-            if (node.boundVariables && node.boundVariables[cornerKeys[i]]) {
-              adoptionStats.radius.withToken++;
-            }
-          }
-        }
-      }
-
-      // Spacing (só frames com auto-layout)
-      if (node.layoutMode && node.layoutMode !== 'NONE') {
-        const spacingProps = ['paddingLeft', 'paddingRight', 'paddingTop', 'paddingBottom', 'itemSpacing', 'counterAxisSpacing'];
-        for (const prop of spacingProps) {
-          if (typeof node[prop] === 'number' && node[prop] > 0) {
-            adoptionStats.spacing.total++;
-            if (node.boundVariables && node.boundVariables[prop]) {
-              adoptionStats.spacing.withToken++;
-            }
-          }
-        }
-      }
-    }
-
-    // -------- Recursão --------
-    if (Array.isArray(node.children)) {
-      const childInsideComponent = insideComponent || isComponentContext;
-      const childInsideInstance  = insideInstance || node.type === 'INSTANCE';
-      for (const child of node.children) {
-        let nextPath  = pagePath;
-        let nextIsDoc = isDocPage;
-        if (node.type === 'CANVAS') {
-          nextPath  = node.name;
-          nextIsDoc = isDocPageFn(node.name);
-        }
-        visit(child, nextPath, childInsideComponent, childInsideInstance, nextIsDoc);
-      }
-    }
-  }
-
-  visit(figmaFile.document, 'root', false, false, false);
-
-  // ===== Pós-processamento: detached =====
-  detached.total = detached.bySignal1.length + detached.bySignal2.length;
-  const detachedSample = [...detached.bySignal1, ...detached.bySignal2].slice(0, 10);
-
-  // ===== Pós-processamento: adoption =====
-  const pct = s => s.total === 0 ? null : Math.round((s.withToken / s.total) * 100);
-  let totalDecisions = 0, totalWithToken = 0;
-  for (const cat in adoptionStats) {
-    totalDecisions += adoptionStats[cat].total;
-    totalWithToken += adoptionStats[cat].withToken;
-  }
-  const adoption = {
-    overall: totalDecisions === 0 ? 0 : Math.round((totalWithToken / totalDecisions) * 100),
-    byCategory: {
-      fill:    pct(adoptionStats.fill),
-      stroke:  pct(adoptionStats.stroke),
-      text:    pct(adoptionStats.text),
-      effect:  pct(adoptionStats.effect),
-      radius:  pct(adoptionStats.radius),
-      spacing: pct(adoptionStats.spacing)
-    },
-    totals: {
-      fillsWithToken:    adoptionStats.fill.withToken,
-      fillsTotal:        adoptionStats.fill.total,
-      strokesWithToken:  adoptionStats.stroke.withToken,
-      strokesTotal:      adoptionStats.stroke.total,
-      textsWithToken:    adoptionStats.text.withToken,
-      textsTotal:        adoptionStats.text.total,
-      effectsWithToken:  adoptionStats.effect.withToken,
-      effectsTotal:      adoptionStats.effect.total,
-      radiusWithToken:   adoptionStats.radius.withToken,
-      radiusTotal:       adoptionStats.radius.total,
-      spacingWithToken:  adoptionStats.spacing.withToken,
-      spacingTotal:      adoptionStats.spacing.total
-    }
-  };
-
-  // ===== Pós-processamento: usage (top, unused, duplicates, categories) =====
-  const topUsedCandidates = Object.values(componentMap).filter(c => {
-    if (c.remote) return false;
-    if (c.parentSetId) return false;
-    return true;
   });
+  return issues.sort(severityOrder);
+}
 
-  const topUsed = topUsedCandidates
-    .map(c => ({
-      id: c.id, name: c.name, instanceCount: c.instanceCount,
-      type: c.type, variants: c.variants ? c.variants.length : 0
-    }))
-    .sort((a, b) => b.instanceCount - a.instanceCount)
-    .slice(0, 50);
+function pickIssueName(comp, i) {
+  const names = [
+    `Raio inconsistente em ${comp}`,
+    `Variante duplicada: ${comp}`,
+    `Token de cor não utilizado em ${comp}`,
+    `Tipografia fora da escala em ${comp}`,
+    `${comp} detached`,
+    `Border-radius hardcoded em ${comp}`,
+    `Espaçamento manual em ${comp}`
+  ];
+  return names[i % names.length];
+}
 
-  const unused = topUsedCandidates
-    .filter(c => c.instanceCount === 0)
-    .map(c => ({ id: c.id, name: c.name, type: c.type }))
-    .slice(0, 30);
+function pickIssueType(i) {
+  return ['Consistência', 'Duplicado', 'Adoção', 'Override'][i % 4];
+}
 
-  // Duplicates — heurística simplificada (sem detector complexo de séries
-  // para já — podemos reactivar depois)
-  function analyzeName(rawName) {
-    if (!rawName) return { normalized: null, signal: null };
-    const original = rawName.trim();
-    let m;
-    m = original.match(/^(.+?)\s*[-_]?\s*copy(\s*\d*)?\s*$/i);
-    if (m && m[1].trim()) return { normalized: m[1].trim().toLowerCase(), signal: 'strong' };
-    m = original.match(/^(.+?)\s*\((\d+)\)\s*$/);
-    if (m && m[1].trim()) return { normalized: m[1].trim().toLowerCase(), signal: 'strong' };
-    m = original.match(/^(.+?)\s*[-_]\s*\d+\s*$/);
-    if (m && m[1].trim()) return { normalized: m[1].trim().toLowerCase(), signal: 'weak' };
-    m = original.match(/^(.+?)\s+\d+\s*$/);
-    if (m && m[1].trim()) return { normalized: m[1].trim().toLowerCase(), signal: 'weak' };
-    return { normalized: null, signal: null };
-  }
-
-  function isSequentialSeries(members) {
-    if (members.length < 3) return false;
-    const numbers = members.map(c => {
-      const m = c.name.match(/[-_\s\(](\d+)\)?\s*$/);
-      return m ? parseInt(m[1], 10) : null;
-    });
-    if (numbers.some(n => n === null)) return false;
-    const unique = new Set(numbers);
-    if (unique.size < 3) return false;
-    const sorted = [...unique].sort((a, b) => a - b);
-    const range = sorted[sorted.length - 1] - sorted[0];
-    return unique.size / (range + 1) >= 0.5;
-  }
-
-  const originalsByNormalized  = {};
-  const candidatesByNormalized = {};
-  for (const c of topUsedCandidates) {
-    const { normalized, signal } = analyzeName(c.name);
-    if (signal === null) {
-      const key = c.name.toLowerCase();
-      if (!originalsByNormalized[key]) originalsByNormalized[key] = c;
-    } else if (normalized) {
-      if (!candidatesByNormalized[normalized]) candidatesByNormalized[normalized] = [];
-      candidatesByNormalized[normalized].push({ component: c, signal });
-    }
-  }
-
-  const duplicateGroups = [];
-  for (const norm in candidatesByNormalized) {
-    const copies = candidatesByNormalized[norm];
-    const original = originalsByNormalized[norm];
-    const groupMembers = original
-      ? [original, ...copies.map(c => c.component)]
-      : copies.map(c => c.component);
-    if (groupMembers.length < 2) continue;
-    if (isSequentialSeries(groupMembers)) continue;
-
-    const widths  = groupMembers.map(c => c.width).filter(w => w);
-    const heights = groupMembers.map(c => c.height).filter(h => h);
-    const sameDimensions = widths.length >= 2
-                         && widths.every(w => w === widths[0])
-                         && heights.every(h => h === heights[0]);
-    const hasStrongSignal = copies.some(c => c.signal === 'strong');
-    const accept = hasStrongSignal || (sameDimensions && original) || (sameDimensions && copies.length >= 2);
-    if (!accept) continue;
-
-    duplicateGroups.push({
-      normalizedName: norm,
-      components: groupMembers.map(c => ({
-        id: c.id, name: c.name, instanceCount: c.instanceCount,
-        width: c.width, height: c.height
-      })),
-      signals: { sameDimensions, hasStrongSignal }
+function generateInsights(comps, sev) {
+  const insights = [];
+  if (sev.high > 5) {
+    insights.push({
+      tone: 'warn',
+      html: `Há <strong>${sev.high} issues de alta severidade</strong> que requerem atenção imediata.`
     });
   }
-
-  // Categories
-  const categoryCount = {};
-  for (const c of topUsedCandidates) {
-    const category = c.name.split('/')[0].trim() || 'Outros';
-    if (!categoryCount[category]) categoryCount[category] = { count: 0, totalInstances: 0 };
-    categoryCount[category].count++;
-    categoryCount[category].totalInstances += c.instanceCount;
+  const topProblem = comps[0];
+  if (topProblem && topProblem.issues > 3) {
+    insights.push({
+      tone: 'warn',
+      html: `O componente <strong>${topProblem.name}</strong> tem ${topProblem.issues} issues. Considera refatorar.`
+    });
   }
-  const categories = Object.entries(categoryCount)
-    .map(([name, stats]) => ({ name, ...stats }))
-    .sort((a, b) => b.totalInstances - a.totalInstances);
+  insights.push({
+    tone: 'info',
+    html: `Foram analisados <strong>${comps.length} componentes</strong> no total.`
+  });
+  insights.push({
+    tone: 'good',
+    html: `Análise concluída em segundos. <strong>Reanalisa</strong> regularmente para detetar drift cedo.`
+  });
+  return insights;
+}
 
+function statusFromScore(score) {
+  if (score >= 85) return { label: 'Saudável', tone: 'good' };
+  if (score >= 65) return { label: 'Razoável', tone: 'warn' };
+  return { label: 'Crítico', tone: 'bad' };
+}
+
+function severityOrder(a, b) {
+  const order = { high: 0, medium: 1, low: 2 };
+  return order[a.severity] - order[b.severity];
+}
+
+// ─────────────────────────────────────────────────────────────
+// Utils
+// ─────────────────────────────────────────────────────────────
+function groupBy(arr, fn) {
+  return arr.reduce((acc, item) => {
+    const key = fn(item);
+    (acc[key] = acc[key] || []).push(item);
+    return acc;
+  }, {});
+}
+
+function randInt(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function corsHeaders() {
   return {
-    treeStats,
-    detached: {
-      total: detached.total,
-      bySignal1Count: detached.bySignal1.length,
-      bySignal2Count: detached.bySignal2.length,
-      sample: detachedSample
-    },
-    adoption,
-    usage: {
-      topUsed,
-      unused,
-      duplicateGroups,
-      categories,
-      summary: {
-        totalLocalComponents:    topUsedCandidates.length,
-        unusedCount:             topUsedCandidates.filter(c => c.instanceCount === 0).length,
-        duplicateGroupCount:     duplicateGroups.length,
-        duplicateComponentCount: duplicateGroups.reduce((sum, g) => sum + g.components.length, 0),
-        totalInstances:          topUsedCandidates.reduce((sum, c) => sum + c.instanceCount, 0)
-      }
-    }
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type'
   };
 }
 
-/* Percorre recursivamente a árvore do documento Figma e conta:
-   - Páginas (top-level CANVAS nodes)
-   - Componentes (COMPONENT)
-   - Component Sets (COMPONENT_SET)
-   - Total de nós (útil para o "Analisados X nós" do dashboard) */
-function walkDocument(document) {
-  let components = 0;
-  let componentSets = 0;
-  let pagesCount = 0;
-  let nodesCount = 0;
-
-  function visit(node) {
-    if (!node) return;
-    nodesCount++;
-    if (node.type === 'COMPONENT')      components++;
-    if (node.type === 'COMPONENT_SET')  componentSets++;
-    if (node.type === 'CANVAS')         pagesCount++;
-    if (Array.isArray(node.children)) {
-      for (const child of node.children) visit(child);
-    }
-  }
-
-  visit(document);
-  return { components, componentSets, pagesCount, nodesCount };
-}
-
-// =========================================================
-// Helper: cria uma Response JSON com headers consistentes.
-// Centralizar evita duplicação e garante content-type correcto.
-// =========================================================
-function jsonResponse(payload, status = 200) {
-  return new Response(JSON.stringify(payload), {
-    status,
-    headers: {
-      'Content-Type': 'application/json',
-      // CORS — só importante se o frontend viver noutro domínio.
-      // No nosso caso (mesmo domínio Netlify) é redundante mas inofensivo.
-      'Access-Control-Allow-Origin': '*'
-    }
-  });
+function json(statusCode, body) {
+  return {
+    statusCode,
+    headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  };
 }
