@@ -201,12 +201,56 @@ async function analyzeFigmaFile(file, stylesResponse, figmaUrl, fileKey, token) 
     ? 'crawl'   // detectado no documento (Variables ou hardcoded)
     : 'styles'; // Color/Text Styles publicados
 
+  // ─── INSIGHTS (calculados a partir de dados reais) ───
+  // Ordem: warn → info(s) → good. Insights vazios/zero são omitidos
+  // para evitar mensagens enganadoras (ex: "0 componentes não usados").
+  const insights = [];
+  const totalComponents = compList.length;
+
+  // 1) WARN: componentes nunca usados (instances === 0)
+  const unusedComponents = compList.filter(c => c.instances === 0).length;
+  if (unusedComponents > 0) {
+    insights.push({
+      tone: 'warn',
+      html: `<strong>${unusedComponents}</strong> ${unusedComponents === 1 ? 'componente nunca usado' : 'componentes nunca usados'} no documento`
+    });
+  }
+
+  // 2) INFO: componente mais usado
+  if (totalComponents > 0) {
+    const mostUsed = [...compList].sort((a, b) => b.instances - a.instances)[0];
+    if (mostUsed && mostUsed.instances > 0) {
+      insights.push({
+        tone: 'info',
+        html: `Componente mais usado: <strong>${mostUsed.name}</strong> com ${mostUsed.instances.toLocaleString('pt-PT')} ${mostUsed.instances === 1 ? 'uso' : 'usos'}`
+      });
+    }
+  }
+
+  // 3) INFO: cores únicas detectadas (vem do crawl ou styles)
+  const colorCount = finalColorTokens.length;
+  if (colorCount > 0) {
+    const label = tokensSource === 'styles' ? 'tokens de cor' : 'cores únicas detectadas';
+    insights.push({
+      tone: 'info',
+      html: `<strong>${colorCount}</strong> ${label} no ficheiro`
+    });
+  }
+
+  // 4) GOOD: componentes ativos no design system (sempre, se houver pelo menos 1)
+  if (totalComponents > 0) {
+    insights.push({
+      tone: 'good',
+      html: `<strong>${totalComponents}</strong> ${totalComponents === 1 ? 'componente ativo' : 'componentes ativos'} no design system`
+    });
+  }
+
   return {
     figmaUrl,
     fileName: file.name || 'Untitled',
     analyzedAt: Date.now(),
     healthScore: 75,
-    status: { label: 'Razoável', tone: 'warn' },
+    status: { label: 'Razoável', tone: 'success' },
     totalIssues: 30,
     duplicateVariants: 12,
     adoptionScore: 75,
@@ -217,7 +261,7 @@ async function analyzeFigmaFile(file, stylesResponse, figmaUrl, fileKey, token) 
     trend: { direction: 'flat', delta: 0 },
     issuesBySeverity: { high: 8, medium: 14, low: 8 },
     allIssues: [],
-    insights: [],
+    insights,
     components: compList,
     tokens: {
       color: { total: colorTotal, top: finalColorTokens },
