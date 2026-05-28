@@ -2729,7 +2729,7 @@
       const meta = {
         overview:    { title: 'Overview',     sub: `Última análise: ${formatRelativeTime(state.data.analyzedAt)}` },
         components:  { title: 'Componentes',  sub: `<span class="chip chip--neutral chip--bare">${componentsCount} componentes detetados</span>` },
-        tokens:      { title: 'Foundations',  sub: `<span class="chip chip--neutral chip--bare">${sumTokens(state.data.tokens)} tokens em uso</span><span class="chip chip--neutral chip--bare">${avgAdoption(state.data.tokens)}% de adoção média</span>` },
+        tokens:      { title: 'Foundations',  sub: `<span class="chip chip--neutral chip--bare">${sumTokens(state.data.tokens)} tokens em uso</span>` },
         adoption:    { title: 'Adoção',       sub: 'Em breve' }
       }[view] || { title: 'Overview', sub: '' };
 
