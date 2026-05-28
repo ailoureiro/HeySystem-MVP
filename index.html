@@ -2725,11 +2725,10 @@
       // Line 1 (#scan-meta): contexto específico da view
       // Line 2 (#scan-file): File ID — sempre visível, qualquer view
       const componentsCount = state.data.components.length;
-      const issuesCount = state.data.components.filter(c => c.issues > 0).length;
 
       const meta = {
         overview:    { title: 'Overview',     sub: `Última análise: ${formatRelativeTime(state.data.analyzedAt)}` },
-        components:  { title: 'Componentes',  sub: `<span class="chip chip--neutral chip--bare">${componentsCount} componentes detetados</span><span class="chip chip--neutral chip--bare">${issuesCount} com issues</span>` },
+        components:  { title: 'Componentes',  sub: `<span class="chip chip--neutral chip--bare">${componentsCount} componentes detetados</span>` },
         tokens:      { title: 'Foundations',  sub: `<span class="chip chip--neutral chip--bare">${sumTokens(state.data.tokens)} tokens em uso</span><span class="chip chip--neutral chip--bare">${avgAdoption(state.data.tokens)}% de adoção média</span>` },
         adoption:    { title: 'Adoção',       sub: 'Em breve' }
       }[view] || { title: 'Overview', sub: '' };
@@ -3124,13 +3123,10 @@
             <div class="kpi-card kpi-card--split">
               <div class="kpi-card-body">
                 <p class="kpi-label">Variantes duplicadas</p>
-                <p class="kpi-value">${d.duplicateVariants}</p>
-                <span class="kpi-delta kpi-delta--down">
-                  <i class="bi bi-arrow-down"></i> 8% vs última análise
-                </span>
+                <p class="kpi-value">—</p>
               </div>
               <div class="kpi-card-foot">
-                Detached: ${d.detachedComponents} componentes
+                Em breve
               </div>
             </div>
           </div>
@@ -3220,6 +3216,7 @@
 
       // Agregados
       const total = list.length;
+      const totalVariants = list.reduce((sum, c) => sum + (c.variants || 0), 0);
       const beta = list.filter(c => c.status === 'beta').length;
       const deprecated = list.filter(c => c.status === 'deprecated').length;
       const withIssues = list.filter(c => c.issues > 0).length;
@@ -3302,7 +3299,7 @@
                 <p class="kpi-value">${total}</p>
               </div>
               <div class="kpi-card-foot">
-                Beta: ${beta} · Deprecated: ${deprecated}
+                ${totalVariants.toLocaleString('pt-PT')} ${totalVariants === 1 ? 'variante' : 'variantes'} no total
               </div>
             </div>
           </div>
@@ -3311,10 +3308,10 @@
             <div class="kpi-card kpi-card--split">
               <div class="kpi-card-body">
                 <p class="kpi-label">Com issues</p>
-                <p class="kpi-value">${withIssues}</p>
+                <p class="kpi-value">—</p>
               </div>
               <div class="kpi-card-foot">
-                ${issuesConcentration}% concentrados em 3 componentes
+                Em breve
               </div>
             </div>
           </div>
@@ -3326,7 +3323,7 @@
                 <p class="kpi-value">${d.detachedComponents}</p>
               </div>
               <div class="kpi-card-foot">
-                ${topByIssues.name} tem ${topDetachedShare} das ${d.detachedComponents}
+                Instâncias sem ligação ao componente
               </div>
             </div>
           </div>
@@ -3335,10 +3332,10 @@
             <div class="kpi-card kpi-card--split">
               <div class="kpi-card-body">
                 <p class="kpi-label">Variantes duplicadas</p>
-                <p class="kpi-value">${d.duplicateVariants}</p>
+                <p class="kpi-value">—</p>
               </div>
               <div class="kpi-card-foot">
-                ${topByVariants.name} tem ${redundantCount} variantes redundantes
+                Em breve
               </div>
             </div>
           </div>
