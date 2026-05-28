@@ -91,8 +91,9 @@ async function analyzeFigmaFile(file, stylesResponse, figmaUrl, fileKey, token) 
   }
 
   // ─── BUILD compList: cada item carrega o seu setNodeId para preservar identidade ───
-  // Excluímos sets em pages "Icons" antes de mais nada.
+  // Excluímos sets em pages "Icons" e sets remotos (vindos de outras libraries).
   const compList = componentSets
+    .filter(set => set.remote !== true)
     .filter(set => !isIconPage(crawlResult.componentSetPage[set.node_id]))
     .map(set => {
       const variantsOfSet = components.filter(c => c.componentSetId === set.node_id);
@@ -112,12 +113,18 @@ async function analyzeFigmaFile(file, stylesResponse, figmaUrl, fileKey, token) 
 
   // ─── STANDALONE COMPONENTS ───
   // Componentes sem variants (ex: Tooltip, Divider dentro de frames de documentação).
-  // Critério: COMPONENT sem componentSetId, e fora de pages "Icons".
+  // Critério: COMPONENT sem componentSetId, NÃO remoto, e fora de pages "Icons".
   // Cada um conta como 1 componente com 1 variant.
+  //
+  // remote: true → componente vem de outra library (não está definido neste file).
+  // A Figma lista-os em file.components porque há instâncias deles, mas não temos
+  // o node real no document tree (logo o componentPage fica undefined → falha o
+  // filtro de page). Excluí-los aqui apanha icons importados de bibliotecas externas.
   const standaloneComponents = components.filter(c => {
-    if (c.componentSetId) return false;  // tem set pai → não é standalone
+    if (c.componentSetId) return false;       // tem set pai → não é standalone
+    if (c.remote === true) return false;      // vem de outra library → não conta
     const page = crawlResult.componentPage[c.node_id];
-    if (isIconPage(page)) return false;  // exclui pages de icons
+    if (isIconPage(page)) return false;       // exclui pages "Icons"
     return true;
   });
   standaloneComponents.forEach(c => {
