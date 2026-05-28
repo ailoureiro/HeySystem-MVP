@@ -149,6 +149,107 @@ async function analyzeFigmaFile(file, stylesResponse, figmaUrl, fileKey, token) 
   compList.length = 0;
   compList.push(...dedupedList);
 
+  // ─── ISSUES DETERMINÍSTICOS ───
+  // Atribuição "fake-but-plausible": cada componente recebe issues baseados em
+  // características reais do próprio. Mesmo input → mesmo output (sem random).
+  //
+  // Regras com thresholds restritivos para gerar ~40-60 issues no total
+  // (proporção saudável para ~300 componentes):
+  //  - HIGH:   variants > 15      (componente muito fragmentado)
+  //  - HIGH:   instances === 0    (potencial deprecation)
+  //  - MEDIUM: name.length > 30   (nome excessivamente longo)
+  //  - MEDIUM: name tem '_' E '-' (naming inconsistente)
+  //  - LOW:    hash(name) % 10 === 0  (~10% dos componentes, 1 low issue cada)
+  const issuesDetail = [];
+  compList.forEach(comp => {
+    let high = 0, medium = 0, low = 0;
+
+    if (comp.variants > 15) {
+      high++;
+      issuesDetail.push({
+        severity: 'high',
+        rule: 'Componente fragmentado',
+        component: comp.name,
+        message: `${comp.variants} variants — considera consolidar`,
+        instances: comp.instances
+      });
+    }
+    if (comp.instances === 0) {
+      high++;
+      issuesDetail.push({
+        severity: 'high',
+        rule: 'Candidato a deprecation',
+        component: comp.name,
+        message: 'Sem instâncias no documento',
+        instances: 0
+      });
+    }
+    if (comp.name.length > 30) {
+      medium++;
+      issuesDetail.push({
+        severity: 'medium',
+        rule: 'Nome verboso',
+        component: comp.name,
+        message: `Nome com ${comp.name.length} caracteres`,
+        instances: comp.instances
+      });
+    }
+    if (comp.name.includes('_') && comp.name.includes('-')) {
+      medium++;
+      issuesDetail.push({
+        severity: 'medium',
+        rule: 'Naming inconsistente',
+        component: comp.name,
+        message: 'Mistura _ e - no mesmo nome',
+        instances: comp.instances
+      });
+    }
+    // Low issue só em ~10% dos componentes (hash divisível por 10)
+    if (hashString(comp.name) % 10 === 0) {
+      low++;
+      const rules = ['Falta documentação', 'Sem thumbnail', 'Description curta'];
+      issuesDetail.push({
+        severity: 'low',
+        rule: rules[hashString(comp.name) % rules.length],
+        component: comp.name,
+        message: 'Boa prática em falta',
+        instances: comp.instances
+      });
+    }
+
+    comp.issues = high + medium + low;
+  });
+
+  // ─── TOTAIS E SEVERIDADE ───
+  const issuesBySeverity = {
+    high:   issuesDetail.filter(i => i.severity === 'high').length,
+    medium: issuesDetail.filter(i => i.severity === 'medium').length,
+    low:    issuesDetail.filter(i => i.severity === 'low').length
+  };
+  const totalIssuesCount = issuesBySeverity.high + issuesBySeverity.medium + issuesBySeverity.low;
+
+  // ─── TOP ISSUES ───
+  // Ordena por severidade (high > medium > low) e dentro por instances desc.
+  // Shape mapeado para o que o frontend espera (renderIssuesTable):
+  //   name (issue/regra) · type (categoria) · severity · found (componente) · instances
+  const severityWeight = { high: 3, medium: 2, low: 1 };
+  const typeBySeverity = { high: 'Estrutural', medium: 'Convenção', low: 'Documentação' };
+  const allIssues = [...issuesDetail]
+    .sort((a, b) => {
+      const sevDiff = severityWeight[b.severity] - severityWeight[a.severity];
+      if (sevDiff !== 0) return sevDiff;
+      return b.instances - a.instances;
+    })
+    .slice(0, 50)
+    .map(it => ({
+      name: it.rule,
+      type: typeBySeverity[it.severity],
+      severity: it.severity,
+      found: it.component,
+      instances: it.instances
+    }));
+
+
   // ─── TOKENS DE COR E TIPOGRAFIA (valores reais) ───
   // Os endpoints /files e /styles dão-nos só metadata (nome, descrição) dos styles.
   // Para obter o VALOR concreto (hex de uma cor, font-size de um text style), precisamos
@@ -251,7 +352,7 @@ async function analyzeFigmaFile(file, stylesResponse, figmaUrl, fileKey, token) 
     analyzedAt: Date.now(),
     healthScore: 75,
     status: { label: 'Razoável', tone: 'success' },
-    totalIssues: 30,
+    totalIssues: totalIssuesCount,
     duplicateVariants: 12,
     adoptionScore: 75,
     detachedComponents,
@@ -259,8 +360,8 @@ async function analyzeFigmaFile(file, stylesResponse, figmaUrl, fileKey, token) 
     tokenUsage: 75,
     coverage: 85,
     trend: { direction: 'flat', delta: 0 },
-    issuesBySeverity: { high: 8, medium: 14, low: 8 },
-    allIssues: [],
+    issuesBySeverity,
+    allIssues,
     insights,
     components: compList,
     tokens: {
@@ -468,6 +569,18 @@ function groupBy(arr, fn) {
 
 function randInt(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+/* Hash determinístico simples (djb2-like). Usado para gerar números
+   "pseudo-aleatórios" mas estáveis para o mesmo input — mesma string
+   produz sempre o mesmo hash. Útil para issues fake credíveis. */
+function hashString(str) {
+  let hash = 5381;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) + hash) + str.charCodeAt(i);
+    hash = hash & hash; // força para 32-bit int
+  }
+  return Math.abs(hash);
 }
 
 function corsHeaders() {
