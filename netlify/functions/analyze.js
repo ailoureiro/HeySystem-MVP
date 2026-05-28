@@ -67,43 +67,87 @@ async function analyzeFigmaFile(file, stylesResponse, figmaUrl, fileKey, token) 
     ...meta,
     node_id: nodeId
   }));
-  const componentSets = Object.values(file.componentSets || {});
+  // Mesmo padrão: componentSets também precisa do node_id (chave do objeto)
+  // para podermos cruzar com componentSetPage (do crawl) e com componentSetId
+  // dos components.
+  const componentSets = Object.entries(file.componentSets || {}).map(([nodeId, meta]) => ({
+    ...meta,
+    node_id: nodeId
+  }));
   const styles = stylesResponse?.meta?.styles || [];
 
-  // Componentes "reais" para o utilizador = só componentSets (famílias com variants).
-  // Standalone components (icons, logos, dividers) NÃO contam para o total — são
-  // tipicamente assets, não componentes de UI verdadeiros.
-  const compList = componentSets.map(set => {
-    const variants = components.filter(c => c.componentSetId === set.node_id);
-    return {
-      name: set.name,
-      variants: Math.max(variants.length, 1),
-      instances: 0,
-      adoption: randInt(60, 95),
-      issues: randInt(0, 5),
-      status: 'active'
-    };
-  });
-
-  // ─── CRAWL ÚNICO ───
-  // Percorre o document tree uma só vez e devolve:
-  //   - detachedCount: nº de INSTANCEs sem ligação ao main component
-  //   - instancesByComponentId: { "<componentId>": count } — uso por variant
+  // ─── CRAWL ÚNICO (corre primeiro porque precisamos do componentSetPage) ───
   const crawlResult = crawlDocument(file.document);
   const detachedComponents = crawlResult.detachedCount;
 
-  // ─── PREENCHER INSTANCES POR COMPONENTE ───
-  // Para cada componentSet, somamos as instâncias de TODOS os seus variants.
-  // O node.componentId de cada INSTANCE corresponde ao node_id do main component
-  // (= chave do objecto file.components).
-  compList.forEach(comp => {
-    const set = componentSets.find(s => s.name === comp.name);
-    if (!set) return;
-    const variantsOfSet = components.filter(c => c.componentSetId === set.node_id);
-    comp.instances = variantsOfSet.reduce((sum, variant) => {
-      return sum + (crawlResult.instancesByComponentId[variant.node_id] || 0);
-    }, 0);
+  // ─── FILTRO: excluir componentSets em pages "Icons" ───
+  // Heurística conservadora: só exclui se a page se chamar literalmente
+  // "Icons", "Icon Library", "Iconography" ou "Ícones" (case-insensitive).
+  // Não usamos detecção pelo nome do componente (pode ter falsos positivos).
+  const ICON_PAGE_NAMES = ['icons', 'icon library', 'iconography', 'ícones', 'icones'];
+  function isIconPage(pageName) {
+    if (!pageName) return false;
+    return ICON_PAGE_NAMES.includes(pageName.trim().toLowerCase());
+  }
+
+  // ─── BUILD compList: cada item carrega o seu setNodeId para preservar identidade ───
+  // Excluímos sets em pages "Icons" antes de mais nada.
+  const compList = componentSets
+    .filter(set => !isIconPage(crawlResult.componentSetPage[set.node_id]))
+    .map(set => {
+      const variantsOfSet = components.filter(c => c.componentSetId === set.node_id);
+      const instances = variantsOfSet.reduce((sum, variant) => {
+        return sum + (crawlResult.instancesByComponentId[variant.node_id] || 0);
+      }, 0);
+      return {
+        name: set.name,
+        variants: Math.max(variantsOfSet.length, 1),
+        instances,
+        adoption: randInt(60, 95),
+        issues: randInt(0, 5),
+        status: 'active',
+        _setNodeId: set.node_id  // auxiliar — removido antes de devolver
+      };
+    });
+
+  // ─── STANDALONE COMPONENTS ───
+  // Componentes sem variants (ex: Tooltip, Divider dentro de frames de documentação).
+  // Critério: COMPONENT sem componentSetId, e fora de pages "Icons".
+  // Cada um conta como 1 componente com 1 variant.
+  const standaloneComponents = components.filter(c => {
+    if (c.componentSetId) return false;  // tem set pai → não é standalone
+    const page = crawlResult.componentPage[c.node_id];
+    if (isIconPage(page)) return false;  // exclui pages de icons
+    return true;
   });
+  standaloneComponents.forEach(c => {
+    const instances = crawlResult.instancesByComponentId[c.node_id] || 0;
+    compList.push({
+      name: c.name,
+      variants: 1,
+      instances,
+      adoption: randInt(60, 95),
+      issues: randInt(0, 5),
+      status: 'active',
+      _setNodeId: c.node_id  // usa node_id próprio (não tem set)
+    });
+  });
+
+  // ─── DEDUPLICAR POR NOME ───
+  // Quando o mesmo nome aparece em pages diferentes (ex: "Pill" em Dark e Light),
+  // mantém só o mais usado (= mais instâncias). Em empate, fica o primeiro.
+  const byName = {};
+  compList.forEach(comp => {
+    const existing = byName[comp.name];
+    if (!existing || comp.instances > existing.instances) {
+      byName[comp.name] = comp;
+    }
+  });
+  const dedupedList = Object.values(byName);
+  // Limpa o auxiliar e substitui o compList
+  dedupedList.forEach(c => delete c._setNodeId);
+  compList.length = 0;
+  compList.push(...dedupedList);
 
   // ─── TOKENS DE COR E TIPOGRAFIA (valores reais) ───
   // Os endpoints /files e /styles dão-nos só metadata (nome, descrição) dos styles.
@@ -199,15 +243,31 @@ function crawlDocument(rootNode) {
   let detachedCount = 0;
   const instancesByComponentId = {};
   const usageByStyleId = {};
-  // Cores hardcoded — chave = hex, valor = contagem.
-  // "Hardcoded" aqui significa: SOLID fill SEM referência a um Style/Variable
-  // OU com referência a Variable (que não conseguimos resolver sem API Enterprise).
-  // O que conseguimos sempre é o valor final renderizado.
   const colorsByHex = {};
-  // Tipografia única — chave = "Family·Size·Weight", valor = { ...meta, count }
   const typographyByKey = {};
+  // Mapa { componentSetNodeId: pageName } — usado para excluir sets em pages
+  // específicas (ex: "Icons") da contagem total de componentes.
+  const componentSetPage = {};
+  // Mesmo para COMPONENT standalone (sem variants).
+  const componentPage = {};
 
-  function walk(node) {
+  // currentPage é mantida durante a recursão. Pages são nodes type=CANVAS
+  // imediatamente abaixo do DOCUMENT root.
+  function walk(node, currentPage) {
+    // Se este node é uma CANVAS (page), actualiza o contexto para os children
+    if (node.type === 'CANVAS') {
+      currentPage = node.name || '';
+    }
+    // Regista a page deste componentSet
+    if (node.type === 'COMPONENT_SET') {
+      componentSetPage[node.id] = currentPage || '';
+    }
+    // Regista a page de COMPONENT standalone (sem parent componentSet).
+    // Componentes dentro de um set têm parent COMPONENT_SET e não nos interessam aqui.
+    if (node.type === 'COMPONENT') {
+      componentPage[node.id] = currentPage || '';
+    }
+
     if (node.type === 'INSTANCE') {
       if (!node.componentId || node.isDetached === true) {
         detachedCount++;
@@ -216,7 +276,6 @@ function crawlDocument(rootNode) {
           (instancesByComponentId[node.componentId] || 0) + 1;
       }
     }
-    // Conta uso de styles (cor, texto, etc.) — node.styles é objecto { fill: id, text: id, ... }
     if (node.styles && typeof node.styles === 'object') {
       Object.values(node.styles).forEach(styleId => {
         if (styleId) {
@@ -224,9 +283,6 @@ function crawlDocument(rootNode) {
         }
       });
     }
-    // ─── CORES: agrega valores SOLID únicos ───
-    // Conta visibleFills primeiro (Figma API mais recente); fallback para fills antigo.
-    // Ignora fills invisíveis (visible: false) — drift visual real.
     const fills = node.fills;
     if (Array.isArray(fills)) {
       fills.forEach(fill => {
@@ -237,8 +293,6 @@ function crawlDocument(rootNode) {
         }
       });
     }
-    // ─── TIPOGRAFIA: agrega combinações únicas de family·size·weight ───
-    // Só nodes TEXT têm node.style com tipografia.
     if (node.type === 'TEXT' && node.style) {
       const ts = node.style;
       const family = ts.fontFamily || '?';
@@ -256,11 +310,19 @@ function crawlDocument(rootNode) {
       typographyByKey[key].count++;
     }
     if (node.children && Array.isArray(node.children)) {
-      node.children.forEach(walk);
+      node.children.forEach(child => walk(child, currentPage));
     }
   }
-  walk(rootNode);
-  return { detachedCount, instancesByComponentId, usageByStyleId, colorsByHex, typographyByKey };
+  walk(rootNode, '');
+  return {
+    detachedCount,
+    instancesByComponentId,
+    usageByStyleId,
+    colorsByHex,
+    typographyByKey,
+    componentSetPage,
+    componentPage
+  };
 }
 
 /* Constrói lista de cores a partir do crawl (modo fallback — sem Styles publicados).
