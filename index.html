@@ -3271,19 +3271,23 @@
             <td>${c.variants}</td>
             <td style="font-variant-numeric: tabular-nums;">${c.instances.toLocaleString('pt-PT')}</td>
             <td style="min-width: 180px;">
-              <div class="progress-inline">
-                <div class="progress-track">
-                  <div class="progress-fill ${adoptionClass(c.adoption)}" style="width: ${c.adoption}%"></div>
-                </div>
-                <span class="progress-value">${c.adoption}%</span>
-              </div>
+              ${c.adoption == null
+                ? `<span class="text-muted-sm">—</span>`
+                : `<div class="progress-inline">
+                    <div class="progress-track">
+                      <div class="progress-fill ${adoptionClass(c.adoption)}" style="width: ${c.adoption}%"></div>
+                    </div>
+                    <span class="progress-value">${c.adoption}%</span>
+                  </div>`}
             </td>
             <td>
-              ${c.issues > 0
-                ? `<span class="chip chip--danger chip--bare">${c.issues}</span>`
-                : `<span class="text-muted-sm">—</span>`}
+              ${c.issues == null
+                ? `<span class="text-muted-sm">—</span>`
+                : c.issues > 0
+                  ? `<span class="chip chip--danger chip--bare">${c.issues}</span>`
+                  : `<span class="text-muted-sm">—</span>`}
             </td>
-            <td>${statusChip(c.status)}</td>
+            <td>${c.status == null ? `<span class="text-muted-sm">—</span>` : statusChip(c.status)}</td>
           </tr>
         `).join('');
 
