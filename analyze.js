@@ -33,7 +33,8 @@ exports.handler = async (event) => {
       figmaFetch(`/files/${fileKey}`, token),
       figmaFetch(`/files/${fileKey}/styles`, token)
     ]);
-    return json(200, analyzeFigmaFile(fileData, stylesData, figmaUrl));
+    const result = await analyzeFigmaFile(fileData, stylesData, figmaUrl, fileKey, token);
+    return json(200, result);
   } catch (err) {
     return json(err.status || 500, { error: err.message, details: err.details });
   }
@@ -58,7 +59,7 @@ function extractFigmaFileKey(url) {
   return match ? match[1] : null;
 }
 
-function analyzeFigmaFile(file, stylesResponse, figmaUrl) {
+async function analyzeFigmaFile(file, stylesResponse, figmaUrl, fileKey, token) {
   // IMPORTANTE: em file.components, a chave do objeto é o node_id (ex: "1:23"),
   // não o publish key. Como o array de Object.values() não traz a chave,
   // usamos Object.entries() e injectamos node_id em cada item.
@@ -104,7 +105,33 @@ function analyzeFigmaFile(file, stylesResponse, figmaUrl) {
     }, 0);
   });
 
+  // ─── TOKENS DE COR E TIPOGRAFIA (valores reais) ───
+  // Os endpoints /files e /styles dão-nos só metadata (nome, descrição) dos styles.
+  // Para obter o VALOR concreto (hex de uma cor, font-size de um text style), precisamos
+  // de chamar /files/:key/nodes?ids=... com os node_ids dos styles. Uma só chamada,
+  // bulk, para todos os styles.
   const styleByType = groupBy(styles, s => s.style_type);
+  const colorStyles = styleByType.FILL || [];
+  const textStyles  = styleByType.TEXT || [];
+
+  const styleNodeIds = [...colorStyles, ...textStyles].map(s => s.node_id).filter(Boolean);
+  let styleNodes = {};
+  if (styleNodeIds.length > 0) {
+    try {
+      // GET /v1/files/:key/nodes?ids=id1,id2,...
+      const nodesResponse = await figmaFetch(
+        `/files/${fileKey}/nodes?ids=${styleNodeIds.join(',')}`, token
+      );
+      styleNodes = nodesResponse?.nodes || {};
+    } catch (err) {
+      // Se falhar, continuamos com tokens vazios — não bloqueia análise
+      console.warn('Failed to fetch style nodes:', err.message);
+    }
+  }
+
+  const colorTokens = buildColorTokens(colorStyles, styleNodes, crawlResult.usageByStyleId);
+  const typographyTokens = buildTypographyTokens(textStyles, styleNodes, crawlResult.usageByStyleId);
+
   return {
     figmaUrl,
     fileName: file.name || 'Untitled',
@@ -124,8 +151,8 @@ function analyzeFigmaFile(file, stylesResponse, figmaUrl) {
     insights: [],
     components: compList,
     tokens: {
-      color: { total: (styleByType.FILL || []).length, top: [] },
-      typography: { total: (styleByType.TEXT || []).length, top: [] },
+      color: { total: colorStyles.length, top: colorTokens },
+      typography: { total: textStyles.length, top: typographyTokens },
       spacing: { total: 0, top: [] },
       size: { total: 0, top: [] },
       radius: { total: 0, top: [] },
@@ -135,15 +162,17 @@ function analyzeFigmaFile(file, stylesResponse, figmaUrl) {
 }
 
 /* Percorre recursivamente toda a árvore de nodes do ficheiro Figma.
-   Devolve dois agregados num só varrimento (eficiente):
+   Devolve agregados num só varrimento (eficiente):
      - detachedCount: instâncias que perderam ligação ao main component
-     - instancesByComponentId: { componentKey: count } — para contar uso por componente
+     - instancesByComponentId: { componentNodeId: count }
+     - usageByStyleId: { styleId: count } — quantas vezes cada style é referenciado
 
-   NOTA: usamos `componentId` do node INSTANCE como chave, que corresponde
-   ao `key` (não ao `node_id`) do componente em file.components. */
+   NOTA: node.styles é um mapa tipo { fill: "S:abc...", text: "S:def..." }.
+   A chave indica QUE propriedade usa esse style (fill, stroke, text, effect, grid). */
 function crawlDocument(rootNode) {
   let detachedCount = 0;
   const instancesByComponentId = {};
+  const usageByStyleId = {};
 
   function walk(node) {
     if (node.type === 'INSTANCE') {
@@ -154,12 +183,82 @@ function crawlDocument(rootNode) {
           (instancesByComponentId[node.componentId] || 0) + 1;
       }
     }
+    // Conta uso de styles (cor, texto, etc.) — node.styles é objecto { fill: id, text: id, ... }
+    if (node.styles && typeof node.styles === 'object') {
+      Object.values(node.styles).forEach(styleId => {
+        if (styleId) {
+          usageByStyleId[styleId] = (usageByStyleId[styleId] || 0) + 1;
+        }
+      });
+    }
     if (node.children && Array.isArray(node.children)) {
       node.children.forEach(walk);
     }
   }
   walk(rootNode);
-  return { detachedCount, instancesByComponentId };
+  return { detachedCount, instancesByComponentId, usageByStyleId };
+}
+
+/* Constrói lista de tokens de Cor com nome, valor (hex) e nº de usos.
+   - styles: array de styles tipo FILL vindos de /styles
+   - styleNodes: mapa de nodes vindo de /nodes?ids= (contém o documento real do style)
+   - usageByStyleId: contagem do crawl
+
+   Cada style do tipo FILL tem fills[] no node — pegamos o primeiro SOLID
+   (a maioria dos color tokens são single-fill solids; gradientes ficam como '—'). */
+function buildColorTokens(styles, styleNodes, usageByStyleId) {
+  return styles.map(style => {
+    const node = styleNodes[style.node_id]?.document;
+    const fill = node?.fills?.[0];
+    let value = '—';
+    if (fill?.type === 'SOLID' && fill.color) {
+      value = rgbaToHex(fill.color, fill.opacity);
+    } else if (fill?.type?.startsWith('GRADIENT')) {
+      value = 'Gradiente';
+    }
+    return {
+      name: style.name,
+      value,
+      usage: usageByStyleId[style.node_id] || 0
+    };
+  }).sort((a, b) => b.usage - a.usage);
+}
+
+/* Constrói lista de tokens de Tipografia com nome, valor (font/size/weight) e usos.
+   O node de um TEXT style tem style.{fontFamily, fontSize, fontWeight, ...} */
+function buildTypographyTokens(styles, styleNodes, usageByStyleId) {
+  return styles.map(style => {
+    const node = styleNodes[style.node_id]?.document;
+    const ts = node?.style;
+    let value = '—';
+    if (ts) {
+      const family = ts.fontFamily || '?';
+      const size = ts.fontSize ? `${Math.round(ts.fontSize)}px` : '?';
+      const weight = ts.fontWeight || '';
+      value = `${family} ${size}${weight ? ' · ' + weight : ''}`;
+    }
+    return {
+      name: style.name,
+      value,
+      usage: usageByStyleId[style.node_id] || 0
+    };
+  }).sort((a, b) => b.usage - a.usage);
+}
+
+/* Converte { r: 0.5, g: 0.2, b: 0.9 } da Figma API em "#8033E6".
+   r/g/b vêm como floats 0-1 (não 0-255). Inclui alpha se < 1. */
+function rgbaToHex(color, opacity) {
+  const r = Math.round((color.r || 0) * 255);
+  const g = Math.round((color.g || 0) * 255);
+  const b = Math.round((color.b || 0) * 255);
+  const hex = '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('').toUpperCase();
+  // Inclui alpha só se houver transparência real
+  const alpha = opacity ?? color.a ?? 1;
+  if (alpha < 1) {
+    const a = Math.round(alpha * 255).toString(16).padStart(2, '0').toUpperCase();
+    return `${hex}${a}`;
+  }
+  return hex;
 }
 
 function groupBy(arr, fn) {
