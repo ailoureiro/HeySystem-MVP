@@ -132,6 +132,31 @@ async function analyzeFigmaFile(file, stylesResponse, figmaUrl, fileKey, token) 
   const colorTokens = buildColorTokens(colorStyles, styleNodes, crawlResult.usageByStyleId);
   const typographyTokens = buildTypographyTokens(textStyles, styleNodes, crawlResult.usageByStyleId);
 
+  // ─── FALLBACK PARA VARIABLES / SEM STYLES ───
+  // Se a API não devolveu Styles (ficheiro usa Variables OU não tem styles publicados),
+  // construímos a lista a partir do crawl. Resultado: cores e tipografia detectadas
+  // no documento, agregadas por valor único. Sem nomes de tokens, mas com usage real.
+  const finalColorTokens = colorTokens.length > 0
+    ? colorTokens
+    : buildColorTokensFromCrawl(crawlResult.colorsByHex);
+  const finalTypographyTokens = typographyTokens.length > 0
+    ? typographyTokens
+    : buildTypographyTokensFromCrawl(crawlResult.typographyByKey);
+
+  // Quando estamos em fallback mode (sem Styles), o "total" é o nº de valores únicos
+  // detectados no crawl, não o nº de Styles publicados (que é 0).
+  const colorTotal = colorStyles.length > 0
+    ? colorStyles.length
+    : finalColorTokens.length;
+  const typographyTotal = textStyles.length > 0
+    ? textStyles.length
+    : finalTypographyTokens.length;
+
+  // Flag para o frontend mostrar disclaimer quando estamos em modo crawl
+  const tokensSource = (colorStyles.length === 0 && textStyles.length === 0)
+    ? 'crawl'   // detectado no documento (Variables ou hardcoded)
+    : 'styles'; // Color/Text Styles publicados
+
   return {
     figmaUrl,
     fileName: file.name || 'Untitled',
@@ -151,13 +176,14 @@ async function analyzeFigmaFile(file, stylesResponse, figmaUrl, fileKey, token) 
     insights: [],
     components: compList,
     tokens: {
-      color: { total: colorStyles.length, top: colorTokens },
-      typography: { total: textStyles.length, top: typographyTokens },
+      color: { total: colorTotal, top: finalColorTokens },
+      typography: { total: typographyTotal, top: finalTypographyTokens },
       spacing: { total: 0, top: [] },
       size: { total: 0, top: [] },
       radius: { total: 0, top: [] },
       borderWidth: { total: 0, top: [] }
-    }
+    },
+    _meta: { tokensSource }
   };
 }
 
@@ -173,6 +199,13 @@ function crawlDocument(rootNode) {
   let detachedCount = 0;
   const instancesByComponentId = {};
   const usageByStyleId = {};
+  // Cores hardcoded — chave = hex, valor = contagem.
+  // "Hardcoded" aqui significa: SOLID fill SEM referência a um Style/Variable
+  // OU com referência a Variable (que não conseguimos resolver sem API Enterprise).
+  // O que conseguimos sempre é o valor final renderizado.
+  const colorsByHex = {};
+  // Tipografia única — chave = "Family·Size·Weight", valor = { ...meta, count }
+  const typographyByKey = {};
 
   function walk(node) {
     if (node.type === 'INSTANCE') {
@@ -191,12 +224,70 @@ function crawlDocument(rootNode) {
         }
       });
     }
+    // ─── CORES: agrega valores SOLID únicos ───
+    // Conta visibleFills primeiro (Figma API mais recente); fallback para fills antigo.
+    // Ignora fills invisíveis (visible: false) — drift visual real.
+    const fills = node.fills;
+    if (Array.isArray(fills)) {
+      fills.forEach(fill => {
+        if (fill.visible === false) return;
+        if (fill.type === 'SOLID' && fill.color) {
+          const hex = rgbaToHex(fill.color, fill.opacity);
+          colorsByHex[hex] = (colorsByHex[hex] || 0) + 1;
+        }
+      });
+    }
+    // ─── TIPOGRAFIA: agrega combinações únicas de family·size·weight ───
+    // Só nodes TEXT têm node.style com tipografia.
+    if (node.type === 'TEXT' && node.style) {
+      const ts = node.style;
+      const family = ts.fontFamily || '?';
+      const size = ts.fontSize ? Math.round(ts.fontSize) : 0;
+      const weight = ts.fontWeight || 400;
+      const key = `${family}·${size}·${weight}`;
+      if (!typographyByKey[key]) {
+        typographyByKey[key] = {
+          family, size, weight,
+          letterSpacing: ts.letterSpacing?.value,
+          lineHeight: ts.lineHeightPx ? Math.round(ts.lineHeightPx) : null,
+          count: 0
+        };
+      }
+      typographyByKey[key].count++;
+    }
     if (node.children && Array.isArray(node.children)) {
       node.children.forEach(walk);
     }
   }
   walk(rootNode);
-  return { detachedCount, instancesByComponentId, usageByStyleId };
+  return { detachedCount, instancesByComponentId, usageByStyleId, colorsByHex, typographyByKey };
+}
+
+/* Constrói lista de cores a partir do crawl (modo fallback — sem Styles publicados).
+   Cada cor única detectada no documento vira uma "linha" com nome = hex,
+   valor = hex e usage = contagem do crawl.
+
+   Como não temos nome de token, usamos o próprio hex como name. */
+function buildColorTokensFromCrawl(colorsByHex) {
+  return Object.entries(colorsByHex)
+    .map(([hex, count]) => ({
+      name: hex,
+      value: hex,
+      usage: count
+    }))
+    .sort((a, b) => b.usage - a.usage);
+}
+
+/* Constrói lista de tipografia a partir do crawl.
+   Cada combinação única de family·size·weight detectada vira uma linha. */
+function buildTypographyTokensFromCrawl(typographyByKey) {
+  return Object.values(typographyByKey)
+    .map(t => ({
+      name: `${t.family} ${t.size}/${t.weight}`,
+      value: `${t.family} ${t.size}px · ${t.weight}`,
+      usage: t.count
+    }))
+    .sort((a, b) => b.usage - a.usage);
 }
 
 /* Constrói lista de tokens de Cor com nome, valor (hex) e nº de usos.
