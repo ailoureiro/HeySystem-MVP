@@ -1,0 +1,749 @@
+<!DOCTYPE html>
+<html lang="pt-PT">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>HeySystem — Pitch</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+
+<style>
+  :root {
+    --bg:        #0A0A0B;
+    --bg-elev:   #131316;
+    --line:      rgba(255,255,255,0.08);
+    --line-soft: rgba(255,255,255,0.04);
+    --text:      #FAFAFA;
+    --text-2:    rgba(250,250,250,0.65);
+    --text-3:    rgba(250,250,250,0.40);
+    --accent:    #8B5CF6;
+    --accent-2:  #7C4DFF;
+    --accent-soft: rgba(139, 92, 246, 0.15);
+    --success:   #05A357;
+    --warning:   #F59E0B;
+    --danger:    #EF4444;
+    --font:      'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-weight: 400;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.025 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    opacity: 0.5;
+    pointer-events: none;
+    z-index: 100;
+    mix-blend-mode: overlay;
+  }
+
+  .deck { position: relative; height: 100vh; width: 100vw; }
+
+  /* TODOS os slides agora centrados horizontalmente */
+  .slide {
+    position: absolute; inset: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    padding: 7vh 9vw;
+    opacity: 0;
+    transform: translateY(20px);
+    transition: opacity 0.5s ease, transform 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+    pointer-events: none;
+  }
+  .slide.is-active {
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+  }
+
+  /* Eyebrow */
+  .eyebrow {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 28px;
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .eyebrow::before,
+  .eyebrow::after {
+    content: '';
+    width: 20px; height: 1px;
+    background: var(--accent);
+    display: inline-block;
+  }
+
+  /* Display — reduzido em todos os tamanhos */
+  .display {
+    font-family: var(--font);
+    font-weight: 700;
+    font-size: clamp(36px, 5vw, 72px);
+    line-height: 1.05;
+    letter-spacing: -0.03em;
+    margin-bottom: 0.4em;
+    max-width: 1000px;
+  }
+  .display .accent {
+    color: var(--accent);
+    font-weight: 700;
+  }
+  .display .light {
+    font-weight: 300;
+    color: var(--text-2);
+  }
+
+  /* Lead */
+  .lead {
+    font-size: clamp(16px, 1.25vw, 19px);
+    line-height: 1.6;
+    color: var(--text-2);
+    max-width: 640px;
+    font-weight: 400;
+  }
+  .lead strong {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  /* ─────────── SLIDE 1 — HERO ─────────── */
+  #slide-0 .display { font-size: clamp(44px, 6vw, 88px); }
+  #slide-0 .signature {
+    margin-top: 64px;
+    display: inline-flex;
+    align-items: center;
+    gap: 16px;
+    font-size: 12px;
+    color: var(--text-3);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    font-weight: 500;
+  }
+  #slide-0 .signature .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 16px var(--success);
+    animation: pulse 2.4s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  /* Logo fixo */
+  .logo {
+    position: fixed;
+    top: 32px;
+    left: 9vw;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: var(--text);
+    z-index: 50;
+  }
+  .logo-mark {
+    width: 32px; height: 32px;
+    border-radius: 9px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    display: grid;
+    place-items: center;
+    color: white;
+    font-size: 16px;
+    box-shadow: 0 4px 14px rgba(139, 92, 246, 0.35);
+  }
+
+  /* ─────────── SLIDE 2 — PROBLEMA ─────────── */
+  .stats-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 48px;
+    margin-top: 56px;
+    padding-top: 40px;
+    border-top: 1px solid var(--line);
+    width: 100%;
+    max-width: 880px;
+  }
+  .stat-item {
+    text-align: center;
+  }
+  .stat-item .stat-num {
+    font-size: clamp(40px, 4.5vw, 64px);
+    line-height: 1;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    margin-bottom: 12px;
+  }
+  .stat-item .stat-label {
+    font-size: 13px;
+    color: var(--text-2);
+    line-height: 1.45;
+    font-weight: 400;
+    max-width: 220px;
+    margin: 0 auto;
+  }
+
+  /* ─────────── SLIDE 3 — SOLUÇÃO ─────────── */
+  .feature-list {
+    list-style: none;
+    margin-top: 40px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    align-items: center;
+    max-width: 600px;
+  }
+  .feature-list li {
+    display: flex;
+    gap: 12px;
+    align-items: baseline;
+    font-size: 15px;
+    color: var(--text-2);
+    line-height: 1.5;
+    font-weight: 400;
+    text-align: left;
+  }
+  .feature-list .check {
+    color: var(--success);
+    font-size: 14px;
+    flex-shrink: 0;
+    font-weight: 700;
+  }
+  .feature-list strong { color: var(--text); font-weight: 600; }
+
+  /* Mock dashboard centrado */
+  .mock {
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 20px;
+    width: 100%;
+    max-width: 520px;
+    margin-top: 40px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    position: relative;
+    overflow: hidden;
+    text-align: left;
+  }
+  .mock::after {
+    content: '';
+    position: absolute;
+    top: 0; right: 0;
+    width: 180px; height: 180px;
+    background: radial-gradient(circle, var(--accent-soft), transparent 70%);
+    pointer-events: none;
+  }
+  .mock-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .mock-title { font-size: 12px; color: var(--text-2); font-weight: 500; }
+  .mock-dots { display: flex; gap: 6px; }
+  .mock-dots span { width: 7px; height: 7px; border-radius: 50%; background: var(--line); }
+  .mock-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+  }
+  .mock-card {
+    background: rgba(255,255,255,0.02);
+    border: 1px solid var(--line-soft);
+    border-radius: 8px;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    min-height: 96px;
+  }
+  .mock-card .mc-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-3);
+    font-weight: 600;
+  }
+  .mock-card .mc-value {
+    font-size: 30px;
+    line-height: 1;
+    margin-top: 4px;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+  }
+  .mock-card .mc-foot {
+    font-size: 10px;
+    color: var(--text-3);
+    margin-top: 6px;
+    font-weight: 400;
+  }
+
+  /* ─────────── SLIDE 4 — TECH ─────────── */
+  .flow {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr auto 1fr;
+    gap: 24px;
+    align-items: center;
+    margin-top: 48px;
+    padding-top: 40px;
+    border-top: 1px solid var(--line);
+    width: 100%;
+    max-width: 880px;
+  }
+  .flow-node {
+    text-align: center;
+  }
+  .flow-node .fn-icon {
+    width: 52px; height: 52px;
+    margin: 0 auto 14px;
+    border: 1px solid var(--line);
+    border-radius: 13px;
+    background: var(--bg-elev);
+    display: grid; place-items: center;
+    font-size: 20px;
+    color: var(--accent);
+  }
+  .flow-node .fn-title {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text);
+    margin-bottom: 6px;
+  }
+  .flow-node .fn-sub {
+    font-size: 12px;
+    color: var(--text-3);
+    font-weight: 400;
+  }
+  .flow-arrow {
+    color: var(--text-3);
+    font-size: 18px;
+    font-weight: 300;
+  }
+
+  /* ─────────── SLIDE 5 — HONESTIDADE ─────────── */
+  .reality-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+    margin-top: 40px;
+    border-top: 1px solid var(--line);
+    width: 100%;
+    max-width: 880px;
+    text-align: left;
+  }
+  .reality-col {
+    padding: 28px 32px 28px 0;
+  }
+  .reality-col + .reality-col {
+    padding-left: 32px;
+    padding-right: 0;
+    border-left: 1px solid var(--line);
+  }
+  .reality-col h3 {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    margin-bottom: 18px;
+  }
+  .reality-col h3.now { color: var(--success); }
+  .reality-col h3.next { color: var(--warning); }
+  .reality-col ul {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 11px;
+  }
+  .reality-col li {
+    font-size: 14px;
+    color: var(--text-2);
+    padding-left: 18px;
+    position: relative;
+    line-height: 1.55;
+    font-weight: 400;
+  }
+  .reality-col li::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 9px;
+    width: 8px; height: 1px;
+    background: var(--text-3);
+  }
+  .reality-col li strong { color: var(--text); font-weight: 600; }
+
+  /* ─────────── SLIDE 6 — CTA ─────────── */
+  #slide-5 .display { font-size: clamp(44px, 6vw, 80px); margin-bottom: 24px; }
+  #slide-5 .url-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 28px;
+    padding: 11px 20px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--bg-elev);
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text);
+    text-decoration: none;
+    transition: all 0.2s ease;
+  }
+  #slide-5 .url-pill:hover {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+  #slide-5 .url-pill::before {
+    content: '↗';
+    color: var(--accent);
+    font-weight: 700;
+  }
+  #slide-5 .footer-meta {
+    margin-top: 72px;
+    padding-top: 32px;
+    border-top: 1px solid var(--line);
+    width: 100%;
+    max-width: 560px;
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--text-3);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    font-weight: 500;
+  }
+
+  /* Navegação */
+  .nav-meta {
+    position: fixed;
+    bottom: 32px;
+    left: 9vw;
+    right: 9vw;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    color: var(--text-3);
+    z-index: 50;
+    font-weight: 500;
+  }
+  .nav-meta .counter strong {
+    color: var(--text);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .nav-controls {
+    display: flex;
+    gap: 8px;
+  }
+  .nav-btn {
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--text-2);
+    width: 36px; height: 36px;
+    border-radius: 8px;
+    cursor: pointer;
+    display: grid; place-items: center;
+    transition: all 0.18s ease;
+    font-size: 14px;
+    font-family: inherit;
+    font-weight: 500;
+  }
+  .nav-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--text);
+    background: var(--accent-soft);
+  }
+  .nav-btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+  }
+  .progress {
+    display: flex;
+    gap: 4px;
+    margin: 0 auto;
+  }
+  .progress-bar {
+    width: 32px;
+    height: 2px;
+    background: var(--line);
+    border-radius: 2px;
+    transition: background 0.3s ease;
+    cursor: pointer;
+    border: none;
+    padding: 0;
+  }
+  .progress-bar.is-active { background: var(--accent); }
+  .progress-bar.is-visited { background: var(--text-3); }
+
+  @media (max-width: 900px) {
+    .slide { padding: 6vh 6vw 12vh; }
+    .logo { left: 6vw; }
+    .nav-meta { left: 6vw; right: 6vw; }
+    .stats-row { grid-template-columns: 1fr; gap: 28px; }
+    .flow { grid-template-columns: 1fr; gap: 16px; }
+    .flow-arrow { transform: rotate(90deg); }
+    .reality-grid { grid-template-columns: 1fr; }
+    .reality-col + .reality-col { padding-left: 0; border-left: none; border-top: 1px solid var(--line); padding-top: 28px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="logo">
+  <span class="logo-mark"><i class="bi bi-stack"></i></span>
+  <span>HeySystem</span>
+</div>
+
+<div class="deck">
+
+  <!-- SLIDE 1 — HERO -->
+  <section class="slide is-active" id="slide-0">
+    <p class="eyebrow">Pitch · Vibe Coding · 2026</p>
+    <h1 class="display">
+      Como está<br>
+      o teu <span class="accent">Design System?</span>
+    </h1>
+    <p class="lead" style="margin-top: 24px;">
+      Diagnóstico automático para ficheiros Figma.<br>
+      Componentes, tokens e adoção — num só painel.
+    </p>
+    <div class="signature">
+      <span class="dot"></span>
+      <span>Ana Loureiro</span>
+      <span style="color: var(--line);">/</span>
+      <span>Digital Product Designer</span>
+    </div>
+  </section>
+
+  <!-- SLIDE 2 — PROBLEMA -->
+  <section class="slide" id="slide-1">
+    <p class="eyebrow">01 · O Problema</p>
+    <h2 class="display">
+      Auditorias manuais.<br>
+      <span class="light">Horas perdidas.</span>
+    </h2>
+    <p class="lead" style="margin-top: 24px;">
+      Medir <strong>adoção</strong>, detectar <strong>componentes detached</strong>
+      ou perceber a saúde do sistema implica horas a clicar pelo Figma.
+      Sem dados. Sem visibilidade.
+    </p>
+
+    <div class="stats-row">
+      <div class="stat-item">
+        <div class="stat-num">+8h</div>
+        <div class="stat-label">por auditoria manual num DS de média dimensão</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-num">73%</div>
+        <div class="stat-label">das equipas não mede adoção dos seus componentes</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-num">∞</div>
+        <div class="stat-label">de drift visual acumulado entre análises</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SLIDE 3 — SOLUÇÃO -->
+  <section class="slide" id="slide-2">
+    <p class="eyebrow">02 · A Solução</p>
+    <h2 class="display">
+      Cola o link.<br>
+      <span class="accent">Recebe o diagnóstico.</span>
+    </h2>
+    <p class="lead" style="margin-top: 20px;">
+      Quatro categorias de diagnóstico geradas em segundos<br>
+      a partir do teu ficheiro Figma.
+    </p>
+
+    <ul class="feature-list">
+      <li><span class="check"><i class="bi bi-check2"></i></span><span><strong>Componentes</strong> — total, variantes, instâncias, detached</span></li>
+      <li><span class="check"><i class="bi bi-check2"></i></span><span><strong>Foundations</strong> — cores e tipografia detectadas no documento</span></li>
+      <li><span class="check"><i class="bi bi-check2"></i></span><span><strong>Issues</strong> — priorizados por severidade e impacto</span></li>
+      <li><span class="check"><i class="bi bi-check2"></i></span><span><strong>Insights</strong> — observações acionáveis a partir dos dados</span></li>
+    </ul>
+  </section>
+
+  <!-- SLIDE 4 — TECH -->
+  <section class="slide" id="slide-3">
+    <p class="eyebrow">03 · Como Funciona</p>
+    <h2 class="display">
+      Figma API.<br>
+      <span class="accent">Lógica determinística.</span>
+    </h2>
+    <p class="lead" style="margin-top: 20px;">
+      Métricas calculadas a partir do <strong>document tree real</strong>.<br>
+      Mesmo ficheiro → mesmo resultado, sempre.
+    </p>
+
+    <div class="flow">
+      <div class="flow-node">
+        <div class="fn-icon"><i class="bi bi-file-earmark-code"></i></div>
+        <div class="fn-title">Figma REST</div>
+        <div class="fn-sub">/files /styles /nodes</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-node">
+        <div class="fn-icon"><i class="bi bi-lightning-charge"></i></div>
+        <div class="fn-title">Netlify Function</div>
+        <div class="fn-sub">Crawl recursivo · agregação</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-node">
+        <div class="fn-icon"><i class="bi bi-bar-chart"></i></div>
+        <div class="fn-title">Dashboard</div>
+        <div class="fn-sub">Vanilla JS · &lt;3s render</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SLIDE 5 — HONESTIDADE -->
+  <section class="slide" id="slide-4">
+    <p class="eyebrow">04 · Honestidade Técnica</p>
+    <h2 class="display">
+      O que é real.<br>
+      <span class="light">O que ainda não é.</span>
+    </h2>
+    <p class="lead" style="margin-top: 20px;">
+      A Figma REST API tem limites conhecidos.<br>
+      Em vez de inventar dados, <strong>sinalizamos o que falta</strong>.
+    </p>
+
+    <div class="reality-grid">
+      <div class="reality-col">
+        <h3 class="now">— Disponível agora</h3>
+        <ul>
+          <li><strong>Total de componentes</strong> e variantes</li>
+          <li><strong>Instâncias</strong> por componente (crawl)</li>
+          <li><strong>Detached components</strong></li>
+          <li><strong>Cores e tipografia</strong> detectadas</li>
+          <li><strong>Insights</strong> reais</li>
+        </ul>
+      </div>
+      <div class="reality-col">
+        <h3 class="next">— Requer Figma Enterprise</h3>
+        <ul>
+          <li><strong>Adoção cross-file</strong> (Library Analytics)</li>
+          <li><strong>Variables</strong> com nomes e modes</li>
+          <li><strong>Trend histórico</strong> entre análises</li>
+          <li><strong>Detachments</strong> ao longo do tempo</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- SLIDE 6 — FECHO -->
+  <section class="slide" id="slide-5">
+    <p class="eyebrow">Obrigada</p>
+    <h2 class="display">
+      <span class="accent">Hey, system —</span><br>
+      como estás?
+    </h2>
+    <p class="lead">
+      Construído em ~2 semanas com Claude.<br>
+      Deployed em Netlify · Open source.
+    </p>
+    <a href="https://heysystem-mvp.netlify.app" class="url-pill" target="_blank" rel="noopener">
+      heysystem-mvp.netlify.app
+    </a>
+
+    <div class="footer-meta">
+      <span>Ana Loureiro · 2026</span>
+      <span>Vibe Coding</span>
+    </div>
+  </section>
+
+</div>
+
+<div class="nav-meta">
+  <div class="counter"><strong id="counter-current">01</strong> / <span id="counter-total">06</span></div>
+  <div class="progress" id="progress"></div>
+  <div class="nav-controls">
+    <button class="nav-btn" id="btn-prev" aria-label="Slide anterior">←</button>
+    <button class="nav-btn" id="btn-next" aria-label="Slide seguinte">→</button>
+  </div>
+</div>
+
+<script>
+  const slides = document.querySelectorAll('.slide');
+  const total = slides.length;
+  let current = 0;
+
+  const counterCurrent = document.getElementById('counter-current');
+  const counterTotal = document.getElementById('counter-total');
+  const progress = document.getElementById('progress');
+  const btnPrev = document.getElementById('btn-prev');
+  const btnNext = document.getElementById('btn-next');
+
+  counterTotal.textContent = String(total).padStart(2, '0');
+
+  for (let i = 0; i < total; i++) {
+    const bar = document.createElement('button');
+    bar.className = 'progress-bar' + (i === 0 ? ' is-active' : '');
+    bar.setAttribute('aria-label', `Slide ${i + 1}`);
+    bar.addEventListener('click', () => goTo(i));
+    progress.appendChild(bar);
+  }
+  const bars = progress.querySelectorAll('.progress-bar');
+
+  function goTo(i) {
+    if (i < 0 || i >= total) return;
+    slides[current].classList.remove('is-active');
+    bars[current].classList.remove('is-active');
+    bars[current].classList.add('is-visited');
+    current = i;
+    slides[current].classList.add('is-active');
+    bars[current].classList.add('is-active');
+    bars[current].classList.remove('is-visited');
+    counterCurrent.textContent = String(current + 1).padStart(2, '0');
+    btnPrev.disabled = current === 0;
+    btnNext.disabled = current === total - 1;
+  }
+
+  btnPrev.addEventListener('click', () => goTo(current - 1));
+  btnNext.addEventListener('click', () => goTo(current + 1));
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') {
+      e.preventDefault();
+      goTo(current + 1);
+    } else if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
+      e.preventDefault();
+      goTo(current - 1);
+    } else if (e.key === 'Home') {
+      goTo(0);
+    } else if (e.key === 'End') {
+      goTo(total - 1);
+    }
+  });
+
+  btnPrev.disabled = true;
+</script>
+
+</body>
+</html>
