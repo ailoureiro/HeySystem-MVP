@@ -3108,13 +3108,10 @@
             <div class="kpi-card kpi-card--split">
               <div class="kpi-card-body">
                 <p class="kpi-label">Issues</p>
-                <p class="kpi-value">${d.totalIssues}</p>
-                <span class="kpi-delta kpi-delta--down">
-                  <i class="bi bi-arrow-down"></i> 12% vs última análise
-                </span>
+                <p class="kpi-value">—</p>
               </div>
               <div class="kpi-card-foot">
-                Visual drift: ${d.visualDrift}%
+                Em breve
               </div>
             </div>
           </div>
@@ -3132,13 +3129,14 @@
           </div>
 
           <div class="col-12 col-md-6 col-xl-3">
-            <div class="kpi-card">
-              <p class="kpi-label">Adoção</p>
-              <p class="kpi-value">${d.adoptionScore}<span class="kpi-unit">%</span></p>
-              <span class="kpi-delta kpi-delta--up">
-                <i class="bi bi-arrow-up"></i> 6% vs última análise
-              </span>
-              <p class="kpi-foot">Uso de tokens: ${d.tokenUsage}%</p>
+            <div class="kpi-card kpi-card--split">
+              <div class="kpi-card-body">
+                <p class="kpi-label">Adoção</p>
+                <p class="kpi-value">—</p>
+              </div>
+              <div class="kpi-card-foot">
+                Em breve
+              </div>
             </div>
           </div>
         </div>
@@ -3160,22 +3158,10 @@
                 <h3 class="panel-title">Issues por severidade</h3>
               </div>
               <div class="panel-fill-center">
-                <div class="d-flex align-items-center gap-4 w-100">
-                  ${renderDonut(d.issuesBySeverity)}
-                  <div class="legend flex-grow-1">
-                    <div class="legend-row">
-                      <span class="legend-label"><span class="legend-dot" style="background: var(--color-danger)"></span> Alta</span>
-                      <span class="legend-value">${d.issuesBySeverity.high}</span>
-                    </div>
-                    <div class="legend-row">
-                      <span class="legend-label"><span class="legend-dot" style="background: var(--color-warning)"></span> Média</span>
-                      <span class="legend-value">${d.issuesBySeverity.medium}</span>
-                    </div>
-                    <div class="legend-row">
-                      <span class="legend-label"><span class="legend-dot" style="background: var(--color-info)"></span> Baixa</span>
-                      <span class="legend-value">${d.issuesBySeverity.low}</span>
-                    </div>
-                  </div>
+                <div class="empty-state" style="margin: 0; border: none; background: transparent;">
+                  <i class="bi bi-lock"></i>
+                  <h3>Disponível com Figma Enterprise</h3>
+                  <p>Categorização de issues requer a Library Analytics API.</p>
                 </div>
               </div>
             </div>
@@ -3188,9 +3174,12 @@
             <div class="panel">
               <div class="panel-head">
                 <h3 class="panel-title">Top Issues</h3>
-                <a href="#" class="panel-link" data-action="view-all-issues">Ver todos →</a>
               </div>
-              ${renderIssuesTable(d.allIssues.slice(0, 5))}
+              <div class="empty-state" style="margin: 0; border: none; background: transparent;">
+                <i class="bi bi-lock"></i>
+                <h3>Disponível com Figma Enterprise</h3>
+                <p>A análise detalhada de issues requer a Library Analytics API, disponível apenas em planos Enterprise da Figma.</p>
+              </div>
             </div>
           </div>
 
@@ -3945,21 +3934,21 @@
       const ringsData = [
         {
           label: 'Com issues',
-          value: withIssues,
+          value: null,
           color: 'var(--color-warning)',
-          insight: `${issuesConcentration}% concentrados em 3 componentes`
+          insight: '—'
         },
         {
           label: 'Variantes duplicadas',
-          value: d.duplicateVariants,
+          value: null,
           color: 'var(--color-accent)',
-          insight: `${topByVariants.name} tem ${redundantCount} variantes redundantes`
+          insight: '—'
         },
         {
           label: 'Detached',
           value: d.detachedComponents,
           color: 'var(--color-danger)',
-          insight: `${topByIssues.name} tem ${topDetachedShare} das ${d.detachedComponents}`
+          insight: 'Instâncias sem ligação ao componente'
         }
       ];
 
@@ -3977,8 +3966,8 @@
       const ringsSvg = ringsData.map((ring, i) => {
         const r = radii[i];
         const circumference = 2 * Math.PI * r;
-        // Fração do total. Clamp a 1 — não permite "passar dos 100%"
-        const ratio = Math.min(1, ring.value / total);
+        // null = sem dados → arco vazio (0%). Caso contrário, fracção do total.
+        const ratio = ring.value == null ? 0 : Math.min(1, ring.value / total);
         const dashOffset = circumference - ratio * circumference;
         return `
           <!-- Track de fundo -->
@@ -4001,7 +3990,7 @@
           <div class="health-legend-content">
             <div class="health-legend-head">
               <span class="health-legend-label">${ring.label}</span>
-              <span class="health-legend-value">${ring.value}</span>
+              <span class="health-legend-value">${ring.value == null ? '—' : ring.value}</span>
             </div>
             <div class="health-legend-insight">${ring.insight}</div>
           </div>
