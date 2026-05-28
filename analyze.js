@@ -103,9 +103,9 @@ async function analyzeFigmaFile(file, stylesResponse, figmaUrl, fileKey, token) 
         name: set.name,
         variants: Math.max(variantsOfSet.length, 1),
         instances,
-        adoption: randInt(60, 95),
-        issues: randInt(0, 5),
-        status: 'active',
+        adoption: null,
+        issues: null,
+        status: null,
         _setNodeId: set.node_id  // auxiliar — removido antes de devolver
       };
     });
@@ -126,9 +126,9 @@ async function analyzeFigmaFile(file, stylesResponse, figmaUrl, fileKey, token) 
       name: c.name,
       variants: 1,
       instances,
-      adoption: randInt(60, 95),
-      issues: randInt(0, 5),
-      status: 'active',
+      adoption: null,
+      issues: null,
+      status: null,
       _setNodeId: c.node_id  // usa node_id próprio (não tem set)
     });
   });
