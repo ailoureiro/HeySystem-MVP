@@ -3108,10 +3108,10 @@
             <div class="kpi-card kpi-card--split">
               <div class="kpi-card-body">
                 <p class="kpi-label">Issues</p>
-                <p class="kpi-value">—</p>
+                <p class="kpi-value">${d.totalIssues}</p>
               </div>
               <div class="kpi-card-foot">
-                Em breve
+                Alta: ${d.issuesBySeverity.high} · Média: ${d.issuesBySeverity.medium} · Baixa: ${d.issuesBySeverity.low}
               </div>
             </div>
           </div>
@@ -3158,10 +3158,22 @@
                 <h3 class="panel-title">Issues por severidade</h3>
               </div>
               <div class="panel-fill-center">
-                <div class="empty-state" style="margin: 0; border: none; background: transparent;">
-                  <i class="bi bi-lock"></i>
-                  <h3>Disponível com Figma Enterprise</h3>
-                  <p>Categorização de issues requer a Library Analytics API.</p>
+                <div class="d-flex align-items-center gap-4 w-100">
+                  ${renderDonut(d.issuesBySeverity)}
+                  <div class="legend flex-grow-1">
+                    <div class="legend-row">
+                      <span class="legend-label"><span class="legend-dot" style="background: var(--color-danger)"></span> Alta</span>
+                      <span class="legend-value">${d.issuesBySeverity.high}</span>
+                    </div>
+                    <div class="legend-row">
+                      <span class="legend-label"><span class="legend-dot" style="background: var(--color-warning)"></span> Média</span>
+                      <span class="legend-value">${d.issuesBySeverity.medium}</span>
+                    </div>
+                    <div class="legend-row">
+                      <span class="legend-label"><span class="legend-dot" style="background: var(--color-info)"></span> Baixa</span>
+                      <span class="legend-value">${d.issuesBySeverity.low}</span>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -3175,11 +3187,7 @@
               <div class="panel-head">
                 <h3 class="panel-title">Top Issues</h3>
               </div>
-              <div class="empty-state" style="margin: 0; border: none; background: transparent;">
-                <i class="bi bi-lock"></i>
-                <h3>Disponível com Figma Enterprise</h3>
-                <p>A análise detalhada de issues requer a Library Analytics API, disponível apenas em planos Enterprise da Figma.</p>
-              </div>
+              ${renderIssuesTable(d.allIssues.slice(0, 5))}
             </div>
           </div>
 
@@ -3301,10 +3309,10 @@
             <div class="kpi-card kpi-card--split">
               <div class="kpi-card-body">
                 <p class="kpi-label">Com issues</p>
-                <p class="kpi-value">—</p>
+                <p class="kpi-value">${withIssues}</p>
               </div>
               <div class="kpi-card-foot">
-                Em breve
+                ${list.length > 0 ? Math.round((withIssues / list.length) * 100) : 0}% dos componentes
               </div>
             </div>
           </div>
@@ -3934,9 +3942,9 @@
       const ringsData = [
         {
           label: 'Com issues',
-          value: null,
+          value: withIssues,
           color: 'var(--color-warning)',
-          insight: '—'
+          insight: `${withIssues} de ${list.length} componentes`
         },
         {
           label: 'Variantes duplicadas',
