@@ -2239,10 +2239,9 @@
             <label for="filter-type" class="filter-label">Tipo</label>
             <select id="filter-type" class="filter-select">
               <option value="all">Todos</option>
-              <option value="Consistência">Consistência</option>
-              <option value="Adoção">Adoção</option>
-              <option value="Duplicado">Duplicado</option>
-              <option value="Override">Override</option>
+              <option value="Estrutural">Estrutural</option>
+              <option value="Convenção">Convenção</option>
+              <option value="Documentação">Documentação</option>
             </select>
           </div>
           <div class="filter-field">
@@ -3186,6 +3185,7 @@
             <div class="panel">
               <div class="panel-head">
                 <h3 class="panel-title">Top Issues</h3>
+                <a href="#" class="panel-link" data-action="view-all-issues">Ver todos →</a>
               </div>
               ${renderIssuesTable(d.allIssues.slice(0, 5))}
             </div>
