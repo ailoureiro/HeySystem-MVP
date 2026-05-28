@@ -91,9 +91,8 @@ async function analyzeFigmaFile(file, stylesResponse, figmaUrl, fileKey, token) 
   }
 
   // ─── BUILD compList: cada item carrega o seu setNodeId para preservar identidade ───
-  // Excluímos sets em pages "Icons" e sets remotos (vindos de outras libraries).
+  // Excluímos sets em pages "Icons".
   const compList = componentSets
-    .filter(set => set.remote !== true)
     .filter(set => !isIconPage(crawlResult.componentSetPage[set.node_id]))
     .map(set => {
       const variantsOfSet = components.filter(c => c.componentSetId === set.node_id);
@@ -104,9 +103,9 @@ async function analyzeFigmaFile(file, stylesResponse, figmaUrl, fileKey, token) 
         name: set.name,
         variants: Math.max(variantsOfSet.length, 1),
         instances,
-        adoption: randInt(60, 95),
-        issues: randInt(0, 5),
-        status: 'active',
+        adoption: null,
+        issues: null,
+        status: null,
         _setNodeId: set.node_id  // auxiliar — removido antes de devolver
       };
     });
@@ -133,9 +132,9 @@ async function analyzeFigmaFile(file, stylesResponse, figmaUrl, fileKey, token) 
       name: c.name,
       variants: 1,
       instances,
-      adoption: randInt(60, 95),
-      issues: randInt(0, 5),
-      status: 'active',
+      adoption: null,
+      issues: null,
+      status: null,
       _setNodeId: c.node_id  // usa node_id próprio (não tem set)
     });
   });
